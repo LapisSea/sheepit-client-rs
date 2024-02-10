@@ -2,6 +2,9 @@ use std::fmt::Display;
 use reqwest::{Client, IntoUrl, Response};
 use serde::{de, Serialize};
 
+pub const XML_CONTENT: &str = "text/xml";
+pub const XML_CONTENT_O: Option<&str> = Some(XML_CONTENT);
+
 pub async fn postForm<
 	T: Serialize + ?Sized,
 	U: IntoUrl + Display + Clone
@@ -9,11 +12,17 @@ pub async fn postForm<
 	let resp = client.post(url.clone()).form(data).send().await
 		.map_err(|e| format!("Could not get an ok response from {url} because: {e}"))?;
 	
+	requireContentType(requiredContentType, &resp)?;
 	
+	resp.text().await
+		.map_err(|e| format!("Could not get server config body because: {}", e))
+}
+
+pub fn requireContentType(requiredContentType: Option<&str>, resp: &Response) -> Result<(), String> {
 	let validContentType = match requiredContentType {
 		None => { true }//No required type. Anything goes
 		Some(requiredContentType) => {
-			match getContentTypeStr(&resp) {
+			match getContentTypeStr(resp) {
 				None => { false }//Type required but none is provided
 				Some(typ) => {
 					typ.split(';').map(|s| s.trim())
@@ -27,15 +36,13 @@ pub async fn postForm<
 		return Err(format!(
 			"Could not get server config because the response is of invalid type.\n\tRequires {} But got {}",
 			requiredContentType.unwrap_or("none"),
-			match getContentTypeStr(&resp) {
+			match getContentTypeStr(resp) {
 				None => { "".to_string() }
 				Some(s) => { format!(": {}", s) }
 			}
 		));
 	}
-	
-	resp.text().await
-		.map_err(|e| format!("Could not get server config body because: {}", e))
+	Ok(())
 }
 
 fn getContentTypeStr(resp: &Response) -> Option<&str> {
@@ -50,7 +57,7 @@ pub fn fromXml<'de, T: de::Deserialize<'de>>(xml: &str) -> Result<T, String> {
 		let mark = "?>";
 		body = &body[body.find(mark).unwrap_or(0) + mark.len()..].trim();
 	}
-	serde_xml_rs::from_str(body).map_err(|e| format!("Could not parse {} because: {}", std::any::type_name::<T>(), e))
+	serde_xml_rs::from_str(body).map_err(|e| format!("Could not parse {} because: {}\nXML Text:\n{}", std::any::type_name::<T>(), e, xml))
 }
 
 pub fn toXml<T: serde::Serialize>(val: &T) -> Result<String, String> {

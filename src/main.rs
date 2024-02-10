@@ -7,10 +7,13 @@ mod HwInfo;
 mod Work;
 mod ServerConf;
 mod net;
+mod job;
 
-use std::{env, thread};
+use std::{env, io, thread};
+use std::cmp::{max, min};
 use std::fmt::{Display, Formatter};
 use std::future::Future;
+use std::io::stdout;
 use std::ops::{Deref, DerefMut};
 use std::process::ExitCode;
 use std::sync::{Arc, LockResult, Mutex};
@@ -18,9 +21,12 @@ use std::time::Duration;
 use reqwest::{Client, RequestBuilder, Url};
 use reqwest::cookie::{CookieStore, Jar};
 use serde::{de, Deserialize, Serialize};
+use serde_json::from_str;
 use tokio::time::Instant;
-use crate::conf::Config;
+use crate::conf::{ComputeMethod, Config};
 use crate::ServerConf::ConfError;
+use tokio::sync::mpsc;
+use crate::job::JobResponse;
 
 pub const BASE_URL: &str = "https://client.sheepit-renderfarm.com";
 
@@ -39,19 +45,20 @@ pub struct RequestEndPoint {
 }
 
 impl RequestEndPoint {
-	async fn getRequestArg<S: AsRef<str> + Display, ARGS: Serialize + ?Sized>(&self, client: &Client, doamin: S, query: &ARGS) -> Result<String, String> {
+	async fn postRequestQueryParm<S: AsRef<str> + Display, ARGS: Serialize + ?Sized>(&self, client: &Client, doamin: S, query: &ARGS, contentType: Option<&str>) -> Result<String, String> {
 		let path = self.path.as_str();
-		Self::send(path, client.get(format!("{doamin}{path}")).query(query)).await?
+		Self::send(path, client.post(format!("{doamin}{path}")).query(query), contentType).await
 	}
-	async fn getRequest<S: AsRef<str> + Display>(&self, client: &Client, doamin: S) -> Result<String, String> {
+	async fn getRequest<S: AsRef<str> + Display>(&self, client: &Client, doamin: S, contentType: Option<&str>) -> Result<String, String> {
 		let path = self.path.as_str();
-		Self::send(path, client.get(format!("{doamin}{path}"))).await?
+		Self::send(path, client.get(format!("{doamin}{path}")), contentType).await
 	}
 	
-	async fn send(path: &str, res: RequestBuilder) -> Result<Result<String, String>, String> {
+	async fn send(path: &str, res: RequestBuilder, contentType: Option<&str>) -> Result<String, String> {
 		let res = res.send().await
 			.map_err(|e| format!("Failed to get {} because: {}", path, e))?;
-		Ok(res.text().await.map_err(|e| format!("Failed to get body of {} because: {}", path, e)))
+		net::requireContentType(contentType, &res)?;
+		res.text().await.map_err(|e| format!("Failed to get body of {} because: {}", path, e))
 	}
 }
 
@@ -103,7 +110,6 @@ async fn start() -> Result<(), String> {
 	let mut clientConf = conf::read(&mut env::args().skip(1).map(|x| x.into()))?.make()?;
 	
 	let cookieJar = Arc::new(Jar::default());
-	
 	let httpClient = Client::builder()
 		.connect_timeout(Duration::from_secs(30))
 		.timeout(Duration::from_secs(300))
@@ -124,8 +130,6 @@ async fn start() -> Result<(), String> {
 	
 	let serverConf = tryConnect(&httpClient, &clientConf, &hwInfo).await?;
 	println!("{:#?}", serverConf);
-	let cookies = cookieJar.cookies(&Url::parse(clientConf.hostname.as_ref()).unwrap()).unwrap();
-	println!("{:#?}", cookies);
 	
 	if let Some(ref pk) = serverConf.publicKey {
 		clientConf.password = pk.clone().into();
@@ -135,7 +139,11 @@ async fn start() -> Result<(), String> {
 		httpClient: httpClient.into(),
 		serverConf,
 		clientConf,
+		hwInfo,
 	};
+	
+	// let (sender, mut reciever) = mpsc::channel(32);
+	
 	let state = ClientState {
 		shouldRun: true,
 		paused: false,
@@ -145,22 +153,30 @@ async fn start() -> Result<(), String> {
 	let state = Arc::new(Mutex::new(state));
 	
 	keepAliveLoop(server.clone(), state.clone());
+	keepAliveLoop(server.clone(), state.clone());
 	
 	init(state.clone(), &server).await;
+	
+	
+	let server = server.as_ref();
+	loop {
+		let paused;
+		{
+			let state = state.lock().unwrap();
+			if !state.shouldRun { break; }
+			paused = state.paused;
+		}
+		if paused {
+			tSleep!(1);
+			continue;
+		}
+		run(state.clone(), server).await;
+		tSleep!(1);
+	}
 	
 	let wait = 40;
 	for i in 0..wait {
 		println!("Waiting... {}", wait - i);
-		tSleep!(1);
-	}
-	
-	let server = server.as_ref();
-	loop {
-		{
-			let state = state.lock().unwrap();
-			if !state.shouldRun { break; }
-		}
-		run(state.clone(), server).await;
 		tSleep!(1);
 	}
 	cleanup(state, server).await;
@@ -227,23 +243,58 @@ struct ServerConnection {
 	httpClient: Box<Client>,
 	serverConf: ServerConfig,
 	clientConf: Config,
+	hwInfo: HwInfo::HwInfo,
 }
 
+
 impl ServerConnection {
-	fn requestJob(&self) {
-		todo!()
+	async fn requestJob(&self) -> Result<job::JobResponse, String> {
+		println!("Requesting job");
+		
+		let cores = {
+			let maxCores = self.hwInfo.cores;
+			if let Some(maxCoresConf) = self.clientConf.maxCpuCores {
+				max(if maxCores == 1 { 1 } else { 2 }, min(maxCoresConf, maxCores))
+			} else {
+				maxCores
+			}
+		};
+		
+		let maxMemory = {
+			let gig = 1024 * 1024;
+			let freeMemory = max(HwInfo::getSystemFreeMemory(), gig) - gig;
+			min(self.clientConf.maxMemory.unwrap_or(u64::MAX), freeMemory)
+		};
+		
+		let res = self.serverConf.requestJob.postRequestQueryParm(&self.httpClient, self.clientConf.hostname.as_ref(), &[
+			("computemethod", match self.clientConf.computeMethod {
+				ComputeMethod::CpuGpu => { "0" }
+				ComputeMethod::Cpu => { "1" }
+				ComputeMethod::Gpu => { "2" }
+			}),
+			("network_dl", "0"),//TODO
+			("network_up", "0"),//TODO
+			("cpu_cores", cores.to_string().as_str()),
+			("ram_max", maxMemory.to_string().as_str()),
+			("rendertime_max", "-1"),//TODO
+		], net::XML_CONTENT_O).await?;
+		println!("Requested job");
+		net::fromXml(res.as_str())
 	}
+	
 	fn downloadBinary(&self) {
 		todo!()
 	}
+	
 	fn downloadChunk(&self) {
 		todo!()
 	}
+	
 	async fn keepMeAlive(&self, state: ClientState) -> bool {
 		println!("keepMeAlive start");
-		let res = self.serverConf.logout.getRequestArg(&self.httpClient, self.clientConf.hostname.as_ref(), &[
+		let res = self.serverConf.logout.postRequestQueryParm(&self.httpClient, self.clientConf.hostname.as_ref(), &[
 			("paused", state.paused)
-		]).await;
+		], None).await;
 		if res.is_ok() {
 			println!("keepMeAlive ok");
 		}
@@ -252,7 +303,7 @@ impl ServerConnection {
 	
 	async fn logout(&self) -> Result<(), String> {
 		println!("Logging out");
-		let res = self.serverConf.logout.getRequest(&self.httpClient, self.clientConf.hostname.as_ref()).await.map(|_| ());
+		let res = self.serverConf.logout.getRequest(&self.httpClient, self.clientConf.hostname.as_ref(), None).await.map(|_| ());
 		if res.is_ok() {
 			println!("Logged out");
 		}
@@ -264,31 +315,6 @@ impl ServerConnection {
 	}
 }
 
-// struct Task {
-// 	progress: JoinHandle<F>,
-// 	name: Box<str>,
-// }
-//
-// impl<F> Task<F> {
-// 	fn start<T>(name: &str, task: T) -> Task<T::Output>
-// 		where T: Future + Send + 'static,
-// 		      T::Output: Send + 'static
-// 	{
-// 		Task {
-// 			future: Work::spawn(task),
-// 			name: name.into(),
-// 		}
-// 	}
-// 	pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
-// 		where
-// 			F: Future + Send + 'static,
-// 			F::Output: Send + 'static,
-// 	{
-// 		TOKIO_RT.spawn(future)
-//
-// 	}
-// }
-
 #[derive(Debug, Clone)]
 struct ClientState {
 	shouldRun: bool,
@@ -298,6 +324,13 @@ struct ClientState {
 async fn init(state: Arc<Mutex<ClientState>>, server: &ServerConnection) {}
 
 async fn run(state: Arc<Mutex<ClientState>>, server: &ServerConnection) {
+	match server.requestJob().await {
+		Ok(ayy) => { println!("{:#?}", ayy); }
+		Err(err) => {
+			println!("{}", err);
+		}
+	}
+	
 	let mut state = state.lock().unwrap();
 	state.shouldRun = false;
 }

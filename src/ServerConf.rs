@@ -4,7 +4,7 @@ use std::sync::Arc;
 use reqwest::{Client, IntoUrl, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::{HwInfo, LongSummaryStatistics, RequestEndPoint, ServerConfig, SpeedTestTarget};
+use crate::{HwInfo, LongSummaryStatistics, net, RequestEndPoint, ServerConfig, SpeedTestTarget};
 use crate::conf::Config;
 use crate::net::{fromXml, postForm};
 use crate::ServerConf::StatusCodes::Unknown;
@@ -169,7 +169,7 @@ pub async fn fetchNew(httpClient: &Client, conf: &Config, hwInfo: &HwInfo::HwInf
 	let url = format!("{}{}", conf.hostname, SERVER_CONF_ENDPOINT);
 	// println!("{:#?}", args);
 	
-	let xml = postForm(httpClient, url, args, Some("text/xml")).await
+	let xml = postForm(httpClient, url, args, net::XML_CONTENT_O).await
 		.map_err(|e| ConfError::IOError(e.to_string()))?;
 	// println!("Got back:\n{xml}");
 	

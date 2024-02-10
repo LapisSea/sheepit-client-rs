@@ -14,7 +14,7 @@ pub struct HwInfo {
 	pub modelId: u8,
 	pub steppingId: u8,
 	pub frequency: Option<u64>,
-	pub cores: usize,
+	pub cores: u16,
 	pub osName: String,
 	pub hostName: String,
 	pub totalSystemMemory: u64,
@@ -57,7 +57,7 @@ pub async fn collectInfo() -> Result<HwInfo, String> {
 			.map(|v| (v.processor_max_frequency() as u64) * 1_000_000);
 		
 		let cores = cpuid.get_processor_capacity_feature_info()
-			.map(|info| info.num_phys_threads());
+			.map(|info| info.num_phys_threads() as u16);
 		
 		// println!("info done");
 		Ok((vendor, cpuName, familyId, modelId, steppingId, frequency, cores))
@@ -68,8 +68,8 @@ pub async fn collectInfo() -> Result<HwInfo, String> {
 			.with_memory(MemoryRefreshKind::new().with_ram())
 		);
 		let frequency = sys.cpus().first().map(|cpu| cpu.frequency() * 1_000_000);
-		let mem=sys.total_memory();
-		if mem==0 {return Err("Could not get total system memory");}
+		let mem = sys.total_memory() / 1024;
+		if mem == 0 { return Err("Could not get total system memory"); }
 		Ok((frequency, mem))
 	});
 	
@@ -81,13 +81,13 @@ pub async fn collectInfo() -> Result<HwInfo, String> {
 	let (frequency2, totalSystemMemory) = get!(sysInfo)?;
 	if frequency.is_none() {
 		println!("Failed to get frequency from cpuid. Trying again");
-		frequency=frequency2;
+		frequency = frequency2;
 		if frequency.is_none() { println!("Failed to get frequency!"); }
 	}
 	if cores.is_none() {
 		println!("Failed to get core count. Trying again");
 		let sys = System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
-		let count = sys.cpus().len();
+		let count = sys.cpus().len() as u16;
 		if count > 0 { cores = Some(count); }
 	}
 	let cores = cores.ok_or("Failed to get core count!")?;
@@ -96,7 +96,7 @@ pub async fn collectInfo() -> Result<HwInfo, String> {
 	                     System::name().unwrap_or_else(|| "".into()),
 	                     System::os_version().unwrap_or_else(|| "".into()));
 	
-	let hostName=System::host_name().unwrap_or_default();
+	let hostName = System::host_name().unwrap_or_default();
 	
 	Ok(HwInfo {
 		hwId,
@@ -109,6 +109,13 @@ pub async fn collectInfo() -> Result<HwInfo, String> {
 		cores,
 		osName,
 		hostName,
-		totalSystemMemory
+		totalSystemMemory,
 	})
+}
+
+pub fn getSystemFreeMemory() -> u64 {
+	let sys = System::new_with_specifics(RefreshKind::new()
+		.with_memory(MemoryRefreshKind::new().with_ram())
+	);
+	sys.free_memory() / 1024
 }
