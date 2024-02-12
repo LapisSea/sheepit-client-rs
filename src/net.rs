@@ -1,19 +1,13 @@
-use std::borrow::Cow;
 use std::fmt::Display;
-use std::fs;
 use std::fs::File;
-use std::io::{Bytes, Read};
-use std::ops::{Add, AddAssign, Deref};
-use std::path::{Path, PathBuf};
+use std::ops::{Add, AddAssign};
+use std::path::{Path};
 use std::time::Duration;
 use futures_util::StreamExt;
-use mime::Mime;
-use reqwest::{Body, Client, IntoUrl, multipart, RequestBuilder, Response};
-use reqwest::multipart::Part;
+use reqwest::{Client, IntoUrl, RequestBuilder, Response};
 use serde::{de, Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
-use crate::{doesFileExist, net};
 
 pub const XML_CONTENT: &str = "text/xml";
 pub const XML_CONTENT_O: Option<&str> = Some(XML_CONTENT);
@@ -25,7 +19,7 @@ pub struct RequestEndPoint {
 }
 
 impl RequestEndPoint {
-	pub fn get<'a, S: AsRef<str> + Display>(&self, client: &Client, domain: S) -> ReqBuild {
+	pub fn get<S: AsRef<str> + Display>(&self, client: &Client, domain: S) -> ReqBuild {
 		let path = self.makeUrl(domain);
 		ReqBuild {
 			path: path.clone(),
@@ -63,26 +57,6 @@ pub struct ReqBuild {
 	pub req: RequestBuilder,
 }
 
-pub enum VFile {
-	Str { pretendPath: Box<Path>, data: Box<str> },
-	Real(Box<Path>),
-}
-
-impl VFile {
-	fn read(&self) -> Result<Vec<u8>, String> {
-		match self {
-			VFile::Str { data, .. } => { todo!() }
-			VFile::Real(p) => { todo!() }
-		}
-	}
-	fn path(&self) -> &Box<Path> {
-		match self {
-			VFile::Str { pretendPath, .. } => { pretendPath }
-			VFile::Real(p) => { p }
-		}
-	}
-}
-
 impl ReqBuild {
 	pub fn query<ARGS: Serialize + ?Sized>(self, args: &ARGS) -> Self {
 		Self {
@@ -113,12 +87,12 @@ impl Req {
 	pub fn response(self) -> Result<Response, String> {
 		let res = self.res;
 		res.error_for_status_ref().map_err(|e| e.to_string())?;
-	Ok(res)
+		Ok(res)
 	}
 }
 
 pub async fn send<U: Display>(url: U, res: RequestBuilder) -> Result<Response, String> {
-	res.send().await
+	res.send().await.and_then(|res| res.error_for_status())
 		.map_err(|e| format!("Could not get an ok response from {url} because: {e}"))
 }
 
@@ -240,14 +214,14 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str) -> Result<
 	let mut stream = resp.bytes_stream();
 	
 	let mut file = tokio::fs::File::from(File::create(path)
-		.map_err(|e| format!("Could not create file: {}", path.to_string_lossy()))?);
+		.map_err(|e| format!("Could not create file \"{}\" because: {e}", path.to_string_lossy()))?);
 	
 	let mut bytes = 0;
 	let start = Instant::now();
 	
 	let mut context = md5::Context::new();
 	while let Some(item) = StreamExt::next(&mut stream).await {
-		let item = item.map_err(|e| format!("Could not download data because: {e}"))?;
+		let item = item.map_err(|e| format!("Could not download \"{url}\" because: {e}"))?;
 		// println!("chunk len {}", item.len());
 		bytes += item.len() as u64;
 		let ch = item.as_ref();

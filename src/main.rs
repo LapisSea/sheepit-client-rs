@@ -1,6 +1,5 @@
 #![allow(non_snake_case)]
-#![warn(unused_imports)]
-#![warn(dead_code)]
+#![allow(unused_imports, unused_variables, dead_code)]
 
 mod conf;
 mod HwInfo;
@@ -9,34 +8,25 @@ mod ServerConf;
 mod net;
 mod job;
 
-use std::{env, io};
+use std::{env};
 use std::borrow::Cow;
 use std::cmp::{max, min};
-use std::fmt::{Display, Formatter};
-use std::future::Future;
-use std::io::{Read, stdout};
-use std::ops::{Add, AddAssign, Deref, DerefMut};
+use std::ops::{Deref};
 use std::path::Path;
 use std::process::ExitCode;
-use std::rc::Rc;
-use std::sync::{Arc, LockResult, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use reqwest::{Body, Client, Request, RequestBuilder, Url};
-use reqwest::cookie::{CookieStore, Jar};
-use serde::{de, Deserialize, Serialize};
-use serde_json::from_str;
+use reqwest::{Client};
+use reqwest::cookie::{Jar};
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::time::Instant;
 use crate::conf::{ComputeMethod, Config};
 use crate::ServerConf::ConfError;
-use tokio::sync::mpsc;
-use rand::{random, Rng};
+use rand::Rng;
 use reqwest::multipart::{Form, Part};
-use tokio::task::JoinHandle;
 use crate::job::{Chunk, ClientErrorType, Job, JobRequestStatus, JobResponse};
-use crate::net::{Req, ReqBuild, RequestEndPoint, TransferStats, VFile};
-use futures_util::{StreamExt, TryStreamExt};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use crate::net::{RequestEndPoint, TransferStats};
 
 pub const BASE_URL: &str = "https://client.sheepit-renderfarm.com";
 
@@ -99,6 +89,40 @@ struct ServerConfig {
 	speedTestAnswer: RequestEndPoint,
 }
 
+
+#[derive(Debug, Clone)]
+struct ClientState {
+	shouldRun: bool,
+	paused: bool,
+	downloadStats: TransferStats,
+}
+
+fn modState(state: Arc<Mutex<ClientState>>, modf: impl FnOnce(&mut ClientState)) {
+	let mut state = match state.lock() {
+		Ok(g) => { g }
+		Err(err) => {
+			eprintln!("Something has gone very wrong... {err}");
+			return;
+		}
+	};
+	modf(&mut state);
+}
+
+fn getFromState<T>(state: Arc<Mutex<ClientState>>, modf: impl FnOnce(&mut ClientState) -> T) -> Result<T, String> {
+	let mut state = match state.lock() {
+		Ok(g) => { g }
+		Err(err) => {
+			return Err(format!("Something has gone very wrong... {err}"));
+		}
+	};
+	Ok(modf(&mut state))
+}
+
+macro_rules! setState {
+    ($state:expr, $field:ident,$val:expr) => {
+        modState($state.clone(), |mds|mds.$field=$val)
+    };
+}
 
 fn main() -> ExitCode {
 	let res = Work::block(start()).map_err(|e| format!("Aborting client because:\n{e}"));
@@ -166,7 +190,7 @@ async fn start() -> Result<(), String> {
 		
 		if let Err(err) = init(state.clone(), &server).await {
 			println!("Failed to init: {err}");
-			stop(state.clone());
+			setState!(state, shouldRun, false);
 		}
 		
 		loop {
@@ -188,7 +212,7 @@ async fn start() -> Result<(), String> {
 					continue;
 				}
 				AppLoopAction::CreateNewSession => {
-					stop(state.clone());
+					setState!(state, shouldRun, false);
 					if attempts == 3 {
 						break;
 					}
@@ -197,8 +221,7 @@ async fn start() -> Result<(), String> {
 					continue 'loginLoop;
 				}
 				AppLoopAction::FatalStop(fatal) => {
-					let mut state = state.lock().unwrap();
-					state.shouldRun = false;
+					setState!(state, shouldRun, false);
 					println!("A fatal error has occurred. Shutting down because:\n\t{fatal}");
 				}
 			}
@@ -207,16 +230,6 @@ async fn start() -> Result<(), String> {
 		cleanup(state, server.as_ref()).await;
 		return Ok(());
 	}
-}
-
-fn stop(state: Arc<Mutex<ClientState>>) {
-	let mut state = state.lock().unwrap();
-	state.shouldRun = false;
-}
-
-fn pause(state: Arc<Mutex<ClientState>>) {
-	let mut state = state.lock().unwrap();
-	state.paused = true;
 }
 
 fn keepAliveLoop(server: Arc<ServerConnection>, state: Arc<Mutex<ClientState>>) {
@@ -265,7 +278,7 @@ async fn tryConnect(httpClient: &Client, conf: &mut Config, hwInfo: &HwInfo::HwI
 				let att = min(attempt, 9);
 				let time = att * att * 20;
 				let timeMsg = if attempt >= 10 {
-					format!("Some time..")
+					"Some time..".to_string()
 				} else {
 					format!("{time} seconds")
 				};
@@ -317,10 +330,9 @@ impl ServerConnection {
 			min(self.clientConf.maxMemory.unwrap_or(u64::MAX), freeMemory)
 		};
 		
-		let (downloadRate, uploadRate) = {
-			let state = state.lock().unwrap();
+		let (downloadRate, uploadRate) = getFromState(state, |state| {
 			(state.downloadStats.toRate(), "0")
-		};
+		})?;
 		
 		let res = servReq!(self,requestJob,post).query(&[
 			("computemethod", match self.clientConf.computeMethod {
@@ -420,13 +432,6 @@ impl ServerConnection {
 	}
 }
 
-#[derive(Debug, Clone)]
-struct ClientState {
-	shouldRun: bool,
-	paused: bool,
-	downloadStats: TransferStats,
-}
-
 async fn init(state: Arc<Mutex<ClientState>>, server: &ServerConnection) -> Result<(), String> {
 	Ok(())
 }
@@ -447,7 +452,7 @@ async fn run(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>) -> A
 		}
 	};
 	
-	let res = match processJob(server.as_ref(), job).await {
+	let res = match preprocessJob(server.as_ref(), job).await {
 		Ok(res) => { res }
 		Err(err) => { return AppLoopAction::FatalStop(err); }
 	};
@@ -468,36 +473,6 @@ async fn run(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>) -> A
 			AppLoopAction::Continue
 		}
 	}
-}
-
-async fn execute_job(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, job: Arc<Job>) -> Result<(), String> {
-	println!("Working on job {}", job.info.name);
-	
-	let ds = Work::spawn(downloadScene(server.clone(), job.clone()));
-	let de = Work::spawn(downloadExecutable(server.clone(), job.clone()));
-	
-	let mut fail = None;
-	let mut stats = TransferStats::default();
-	match ds.await.map_err(|_| "failed to exec task")? {
-		Ok(s) => { stats += s; }
-		Err(e) => { fail = Some(e); }
-	}
-	match de.await.map_err(|_| "failed to exec task")? {
-		Ok(s) => { stats += s; }
-		Err(e) => { fail = Some(e); }
-	}
-	
-	if let Some(err) = fail {
-		return Err(err);
-	}
-	
-	{
-		let mut state = state.lock().unwrap();
-		state.downloadStats += stats;
-	}
-	
-	tSleep!(5);
-	Err("I don't wanna work".to_string())
 }
 
 async fn downloadScene(server: Arc<ServerConnection>, job: Arc<Job>) -> Result<TransferStats, String> {
@@ -533,7 +508,7 @@ impl JobResult {
 	}
 }
 
-async fn processJob(server: &ServerConnection, job: JobResponse) -> Result<JobResult, String> {
+async fn preprocessJob(server: &ServerConnection, job: JobResponse) -> Result<JobResult, String> {
 	if let Some(fileMD5s) = &job.fileMD5s {
 		for path in fileMD5s.iter()
 			.filter(|f| f.action.clone().map(|a| a.eq("delete")).unwrap_or(false))
@@ -578,6 +553,39 @@ async fn processJob(server: &ServerConnection, job: JobResponse) -> Result<JobRe
 	}
 	
 	Ok(job.renderTask.map(|t| JobResult::NewJob(Box::new(t.into()))).unwrap_or(JobResult::JustWaitFixed(1)))
+}
+
+
+async fn execute_job(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, job: Arc<Job>) -> Result<(), String> {
+	println!("Working on job {}", job.info.name);
+	
+	downloadJobFiles(state, server, job).await?;
+	
+	tSleep!(5);
+	Err("I don't wanna work".to_string())
+}
+
+async fn downloadJobFiles(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, job: Arc<Job>) -> Result<(), String> {
+	let ds = Work::spawn(downloadScene(server.clone(), job.clone()));
+	let de = Work::spawn(downloadExecutable(server.clone(), job.clone()));
+	
+	let mut fail = None;
+	let mut stats = TransferStats::default();
+	match ds.await.map_err(|_| "failed to exec task")? {
+		Ok(s) => { stats += s; }
+		Err(e) => { fail = Some(e); }
+	}
+	match de.await.map_err(|_| "failed to exec task")? {
+		Ok(s) => { stats += s; }
+		Err(e) => { fail = Some(e); }
+	}
+	
+	if let Some(err) = fail {
+		return Err(err);
+	}
+	
+	modState(state, |s| s.downloadStats += stats);
+	Ok(())
 }
 
 async fn cleanup(state: Arc<Mutex<ClientState>>, server: &ServerConnection) {
