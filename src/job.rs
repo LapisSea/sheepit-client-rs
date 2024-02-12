@@ -17,7 +17,7 @@ pub struct SessionStats {
 	pub renderableProjects: Option<i32>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Chunk {
 	pub id: String,
 	pub md5: String,
@@ -187,6 +187,6 @@ impl From<RenderTask> for Job {
 
 
 pub enum ClientErrorType {
-	OK=0,
-	UNKNOWN=99,
+	OK = 0,
+	UNKNOWN = 99,
 }
