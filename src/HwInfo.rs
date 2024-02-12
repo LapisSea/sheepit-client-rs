@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use crate::Work;
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HwInfo {
 	pub hwId: String,
 	pub vendor: String,

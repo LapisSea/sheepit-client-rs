@@ -4,14 +4,14 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use crate::BASE_URL;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub enum ComputeMethod {
 	CpuGpu,
 	Cpu,
 	Gpu,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct Config {
 	pub login: Box<str>,
 	pub password: Box<str>,

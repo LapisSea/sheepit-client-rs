@@ -4,9 +4,9 @@ use std::sync::Arc;
 use reqwest::{Client, IntoUrl, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::{HwInfo, LongSummaryStatistics, net, RequestEndPoint, ServerConfig, SpeedTestTarget};
+use crate::{CLIENT_VERSION, HwInfo, LongSummaryStatistics, net, RequestEndPoint, ServerConfig, SpeedTestTarget};
 use crate::conf::Config;
-use crate::net::{fromXml, postForm};
+use crate::net::{fromXml, postRequestForm};
 use crate::ServerConf::StatusCodes::Unknown;
 
 const SERVER_CONF_ENDPOINT: &str = "/server/config.php";
@@ -159,7 +159,7 @@ pub async fn fetchNew(httpClient: &Client, conf: &Config, hwInfo: &HwInfo::HwInf
 		("os_version", hwInfo.osName.clone().into()),
 		("ram", hwInfo.totalSystemMemory.to_string().into()),
 		("bits", if cfg!(target_pointer_width = "64") { "64bit".into() } else { "32bit".into() }),
-		("version", "7.23353.0".into()),
+		("version", CLIENT_VERSION.into()),
 		("hostname", format!("{}", hwInfo.hostName).into()),
 		("ui", "GuiText".into()),
 		("extras", "".into()),
@@ -169,7 +169,7 @@ pub async fn fetchNew(httpClient: &Client, conf: &Config, hwInfo: &HwInfo::HwInf
 	let url = format!("{}{}", conf.hostname, SERVER_CONF_ENDPOINT);
 	// println!("{:#?}", args);
 	
-	let xml = postForm(httpClient, url, args, net::XML_CONTENT_O).await
+	let xml = postRequestForm(httpClient, url, args, net::XML_CONTENT_O).await
 		.map_err(|e| ConfError::IOError(e.to_string()))?;
 	// println!("Got back:\n{xml}");
 	

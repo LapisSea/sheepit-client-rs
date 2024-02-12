@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::ServerConf::StatusCodes;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionStats {
@@ -18,9 +19,10 @@ pub struct SessionStats {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Chunk {
-	id:  String,
-	md5:  String,
+	pub id: String,
+	pub md5: String,
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Chunks {
 	#[serde(alias = "chunk")]
@@ -30,11 +32,11 @@ pub struct Chunks {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RendererInfos {
 	#[serde(alias = "md5")]
-	md5: String,
+	pub md5: String,
 	#[serde(alias = "commandline")]
-	commandline: String,
+	pub commandline: String,
 	#[serde(alias = "update_method")]
-	updateMethod: String,
+	pub updateMethod: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,8 +67,8 @@ pub struct RenderTask {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileMD5 {
-	md5: String,
-	action: Option<String>,
+	pub md5: String,
+	pub action: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,4 +80,113 @@ pub struct JobResponse {
 	pub renderTask: Option<RenderTask>,
 	#[serde(alias = "file")]
 	pub fileMD5s: Option<Vec<FileMD5>>,
+}
+
+impl JobResponse {
+	pub fn status(&self) -> JobRequestStatus {
+		self.status.into()
+	}
+}
+
+pub enum JobRequestStatus {
+	Ok = 0,
+	Unknown = 999,
+	Nojob = 200,
+	ErrorNoRenderingRight = 201,
+	ErrorDeadSession = 202,
+	ErrorSessionDisabled = 203,
+	ErrorSessionDisabledDenoisingNotSupported = 208,
+	ErrorInternalError = 204,
+	ErrorRendererNotAvailable = 205,
+	ServerInMaintenance = 206,
+	ServerOverloaded = 207,
+}
+
+impl From<i32> for JobRequestStatus {
+	fn from(v: i32) -> Self {
+		match v {
+			x if x == JobRequestStatus::Ok as i32 => JobRequestStatus::Ok,
+			x if x == JobRequestStatus::Nojob as i32 => JobRequestStatus::Nojob,
+			x if x == JobRequestStatus::ErrorNoRenderingRight as i32 => JobRequestStatus::ErrorNoRenderingRight,
+			x if x == JobRequestStatus::ErrorDeadSession as i32 => JobRequestStatus::ErrorDeadSession,
+			x if x == JobRequestStatus::ErrorSessionDisabled as i32 => JobRequestStatus::ErrorSessionDisabled,
+			x if x == JobRequestStatus::ErrorSessionDisabledDenoisingNotSupported as i32 => JobRequestStatus::ErrorSessionDisabledDenoisingNotSupported,
+			x if x == JobRequestStatus::ErrorInternalError as i32 => JobRequestStatus::ErrorInternalError,
+			x if x == JobRequestStatus::ErrorRendererNotAvailable as i32 => JobRequestStatus::ErrorRendererNotAvailable,
+			x if x == JobRequestStatus::ServerInMaintenance as i32 => JobRequestStatus::ServerInMaintenance,
+			x if x == JobRequestStatus::ServerOverloaded as i32 => JobRequestStatus::ServerOverloaded,
+			_ => JobRequestStatus::Unknown,
+		}
+	}
+}
+
+#[derive(Debug)]
+pub struct RenderProcess {}
+
+#[derive(Debug)]
+pub struct JobInfo {
+	pub id: String,
+	pub frameNumber: String,
+	pub path: String,
+	pub useGPU: bool,
+	pub validationUrl: String,
+	pub script: String,
+	pub archiveChunks: Vec<Chunk>,
+	pub name: String,
+	pub password: String,
+	pub synchronousUpload: bool,
+	pub rendererInfo: RendererInfos,
+}
+
+#[derive(Debug)]
+pub struct Job {
+	pub info: JobInfo,
+	pub outputImagePath: String,
+	pub previewImagePath: String,
+	pub outputImageSize: u64,
+	pub blenderShortVersion: String,
+	pub blenderLongVersion: String,
+	pub speedSamplesRendered: f32,
+	pub render: RenderProcess,
+	pub askForRendererKill: bool,
+	pub userBlockJob: bool,
+	pub serverBlockJob: bool,
+}
+
+impl From<RenderTask> for Job {
+	fn from(t: RenderTask) -> Self {
+		let info = JobInfo {
+			id: t.id,
+			frameNumber: t.frame,
+			path: t.path.replace("/", std::path::MAIN_SEPARATOR.to_string().as_str()),
+			useGPU: t.useGpu == 1,
+			validationUrl: t.validationUrl,
+			script: t.script,
+			archiveChunks: t.chunks.chunks,
+			name: t.name,
+			password: t.password,
+			synchronousUpload: t.synchronousUpload.eq("1"),
+			rendererInfo: t.rendererInfos,
+		};
+		
+		Job {
+			info,
+			outputImagePath: "".to_string(),
+			previewImagePath: "".to_string(),
+			outputImageSize: 0,
+			blenderShortVersion: "".to_string(),
+			blenderLongVersion: "".to_string(),
+			speedSamplesRendered: 0.0,
+			render: RenderProcess {},
+			askForRendererKill: false,
+			userBlockJob: false,
+			serverBlockJob: false,
+		}
+	}
+}
+
+
+pub enum ClientErrorType {
+	OK=0,
+	UNKNOWN=99,
 }
