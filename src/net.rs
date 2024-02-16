@@ -1,16 +1,47 @@
 use std::fmt::Display;
 use std::fs::File;
+use std::io;
 use std::ops::{Add, AddAssign};
 use std::path::{Path};
 use std::time::Duration;
 use futures_util::StreamExt;
-use reqwest::{Client, IntoUrl, RequestBuilder, Response};
+use md5::Digest;
+use reqwest::{Client, IntoUrl, RequestBuilder, Response, Url};
 use serde::{de, Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
+use crate::fmd5::{checkMd5, computeFileHash, HashCache};
+use crate::defs::*;
 
-pub const XML_CONTENT: &str = "text/xml";
-pub const XML_CONTENT_O: Option<&str> = Some(XML_CONTENT);
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LongSummaryStatistics {
+	count: usize,
+	sum: usize,
+	min: usize,
+	max: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SpeedTestTarget {
+	url: String,
+	speedtest: Duration,
+	ping: LongSummaryStatistics,
+}
+
+impl SpeedTestTarget {
+	pub fn new(url:String)->Self{
+		Self{
+			url,
+			speedtest: Default::default(),
+			ping: LongSummaryStatistics {
+				count: 0,
+				sum: 0,
+				min: usize::MAX,
+				max: usize::MIN,
+			},
+		}
+	}
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RequestEndPoint {
@@ -190,52 +221,55 @@ impl AddAssign for TransferStats {
 	fn add_assign(&mut self, rhs: Self) { *self = (*self) + rhs; }
 }
 
-
-pub async fn doesFileExist(path: &Path) -> std::io::Result<bool> {
-	let mut exists = tokio::fs::try_exists(path).await?;
-	if exists {
-		let metadata = tokio::fs::metadata(path).await?;
-		exists = metadata.len() > 0;
-	}
-	Ok(exists)
-}
-
-pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str) -> Result<TransferStats, String> {
-	if doesFileExist(path).await.map_err(|e| format!("Could not check existence of {} because: {}", path.to_string_lossy(), e))? {
-		return Ok(Default::default());
+pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache: HashCache) -> Result<TransferStats, String> {
+	let pathStr = path.to_string_lossy();
+	if tokio::fs::try_exists(path).await.map_err(|e| format!("Could not check existence of {} because: {}", pathStr, e))? {
+		println!("Checking validity of {pathStr}...");
+		let hash = computeFileHash(path, hashCache).await
+			.map_err(|e| format!("Could not read file \"{}\" because: {e}", pathStr));
+		
+		match hash.and_then(|hash| checkMd5(md5Check, pathStr.as_ref(), hash)) {
+			Ok(_) => {
+				println!("{} already exists, skipping download", pathStr);
+				return Ok(Default::default());
+			}
+			Err(msg) => {
+				println!("{msg}. Re-downloading...");
+				tokio::fs::remove_file(path).await
+					.map_err(|e| format!("Could not delete file \"{}\" because: {e}", pathStr))?;
+			}
+		}
 	}
 	
 	if let Some(parent) = path.parent() {
-		tokio::fs::create_dir_all(parent).await.map_err(|e| format!("Could not create directory: {} because {e}", parent.to_string_lossy()))?;
+		tokio::fs::create_dir_all(parent).await.map_err(|e| format!("Could not create directory: {} because {e}", pathStr))?;
 	}
 	
 	let resp = req.send().await?.response()?;
 	let url = resp.url().to_owned();
 	let mut stream = resp.bytes_stream();
 	
-	let mut file = tokio::fs::File::from(File::create(path)
-		.map_err(|e| format!("Could not create file \"{}\" because: {e}", path.to_string_lossy()))?);
+	let mut file = tokio::fs::File::create(path).await
+		.map_err(|e| format!("Could not create file \"{}\" because: {e}", pathStr))?;
 	
-	let mut bytes = 0;
+	let mut bytesDownloaded = 0;
 	let start = Instant::now();
 	
 	let mut context = md5::Context::new();
 	while let Some(item) = StreamExt::next(&mut stream).await {
 		let item = item.map_err(|e| format!("Could not download \"{url}\" because: {e}"))?;
 		// println!("chunk len {}", item.len());
-		bytes += item.len() as u64;
+		bytesDownloaded += item.len() as u64;
 		let ch = item.as_ref();
 		context.consume(ch);
-		file.write(ch).await.map_err(|e| format!("Could not write to file: {}", path.to_string_lossy()))?;
+		file.write_all(ch).await.map_err(|e| format!("Could not write to file: {}", pathStr))?;
 	}
 	
 	let end = Instant::now();
+	let computed = context.compute();
+	checkMd5(md5Check, url, computed)?;
 	
-	let md5s = format!("{:x}", context.compute());
-	if !md5s.as_str().eq(md5Check) {
-		println!("{md5s}\n{md5Check}");
-		return Err(format!("Hashes do not match for {}", url));
-	}
+	println!("\"{pathStr}\" downloaded!");
 	
-	Ok(start.checked_duration_since(end).map(|time| TransferStats { bytes, time }).unwrap_or_default())
+	Ok(start.checked_duration_since(end).map(|time| TransferStats { bytes: bytesDownloaded, time }).unwrap_or_default())
 }

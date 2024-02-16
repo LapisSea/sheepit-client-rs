@@ -1,8 +1,12 @@
+use std::fmt::{Display, Formatter, Pointer, write};
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use crate::BASE_URL;
+use crate::defs::BASE_URL;
+use crate::job::{Chunk, Job, JobInfo};
+use crate::utils;
+use crate::utils::ResultMsg;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub enum ComputeMethod {
@@ -11,8 +15,18 @@ pub enum ComputeMethod {
 	Gpu,
 }
 
+impl Display for ComputeMethod {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		match self {
+			ComputeMethod::CpuGpu => write!(f, "CPU_GPU"),
+			ComputeMethod::Cpu => write!(f, "CPU"),
+			ComputeMethod::Gpu => write!(f, "GPU"),
+		}
+	}
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-pub struct Config {
+pub struct ClientConfig {
 	pub login: Box<str>,
 	pub password: Box<str>,
 	pub hostname: Box<str>,
@@ -22,6 +36,31 @@ pub struct Config {
 	pub computeMethod: ComputeMethod,
 	pub maxCpuCores: Option<u16>,
 	pub maxMemory: Option<u64>,
+}
+
+impl ClientConfig {
+	pub fn rendererArchivePath(&self, job: &JobInfo) -> PathBuf {
+		self.binCachePath.join(format!("{}.zip", &job.rendererInfo.md5))
+	}
+	pub fn rendererPath(&self, job: &JobInfo) -> PathBuf {
+		self.workPath.join(&job.rendererInfo.md5)
+	}
+	
+	pub fn rendererPathExecutable(&self, job: &JobInfo) -> PathBuf {
+		self.rendererPath(job).join(utils::blendExe())
+	}
+	pub fn scenePath(&self, job: &JobInfo) -> PathBuf {
+		self.workPath.join(&job.id)
+	}
+	pub fn scenePathBlend(&self, job: &JobInfo) -> PathBuf {
+		self.workPath.join(&job.id).join(&job.path)
+	}
+	pub fn chunkPath(&self, chunk: &Chunk) -> PathBuf {
+		self.workPath.join(format!("{}.wool", chunk.id))
+	}
+	pub fn tmpDir(&self) -> PathBuf {
+		self.workPath.join("temp")
+	}
 }
 
 #[derive(Default)]
@@ -38,19 +77,21 @@ pub struct ConfigBuild {
 }
 
 impl ConfigBuild {
-	pub fn make(self) -> Result<Config, String> {
+	pub fn make(self) -> ResultMsg<ClientConfig> {
 		fn req<T>(val: Option<T>, err: &str) -> Result<T, String> {
 			match val {
 				None => Err(err.into()),
 				Some(value) => Ok(value),
 			}
 		}
-		Ok(Config {
+		Ok(ClientConfig {
 			login: req(self.login, "The -login <username> is required")?,
 			password: req(self.password, "The -password <password> is required")?,
 			hostname: self.hostname.unwrap_or(BASE_URL.into()),
-			workPath: req(self.workPath, "The -cache-dir <folder path> is required")?,
-			binCachePath: req(self.binCachePath, "The -cache-dir <folder path> is required")?,
+			workPath: req(self.workPath, "The -cache-dir <folder path> is required")?
+				.canonicalize().map_err(|e| format!("Failed to turn path to absolute{e}"))?.into(),
+			binCachePath: req(self.binCachePath, "The -cache-dir <folder path> is required")?
+				.canonicalize().map_err(|e| format!("Failed to turn path to absolute{e}"))?.into(),
 			headless: self.headless.unwrap_or(false),
 			computeMethod: self.computeMethod.unwrap_or(ComputeMethod::Cpu),
 			maxCpuCores: self.maxCpuCores,

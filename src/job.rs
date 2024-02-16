@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use crate::conf::{ComputeMethod, ClientConfig};
 use crate::ServerConf::StatusCodes;
+use crate::ServerConnection;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionStats {
@@ -137,24 +139,30 @@ pub struct JobInfo {
 	pub synchronousUpload: bool,
 	pub rendererInfo: RendererInfos,
 }
+#[derive(Debug)]
+pub struct JobConfig {
+	pub computeMethod: ComputeMethod,
+	pub cores: u16
+}
 
 #[derive(Debug)]
 pub struct Job {
 	pub info: JobInfo,
-	pub outputImagePath: String,
-	pub previewImagePath: String,
-	pub outputImageSize: u64,
-	pub blenderShortVersion: String,
-	pub blenderLongVersion: String,
-	pub speedSamplesRendered: f32,
-	pub render: RenderProcess,
-	pub askForRendererKill: bool,
-	pub userBlockJob: bool,
-	pub serverBlockJob: bool,
+	pub conf: JobConfig
+	// pub outputImagePath: String,
+	// pub previewImagePath: String,
+	// pub outputImageSize: u64,
+	// pub blenderShortVersion: String,
+	// pub blenderLongVersion: String,
+	// pub speedSamplesRendered: f32,
+	// pub render: RenderProcess,
+	// pub askForRendererKill: bool,
+	// pub userBlockJob: bool,
+	// pub serverBlockJob: bool,
 }
 
-impl From<RenderTask> for Job {
-	fn from(t: RenderTask) -> Self {
+impl From<(RenderTask, &ServerConnection)> for Job {
+	fn from((t,s): (RenderTask, &ServerConnection)) -> Self {
 		let info = JobInfo {
 			id: t.id,
 			frameNumber: t.frame,
@@ -171,16 +179,10 @@ impl From<RenderTask> for Job {
 		
 		Job {
 			info,
-			outputImagePath: "".to_string(),
-			previewImagePath: "".to_string(),
-			outputImageSize: 0,
-			blenderShortVersion: "".to_string(),
-			blenderLongVersion: "".to_string(),
-			speedSamplesRendered: 0.0,
-			render: RenderProcess {},
-			askForRendererKill: false,
-			userBlockJob: false,
-			serverBlockJob: false,
+			conf:JobConfig{
+				computeMethod: ComputeMethod::Cpu,
+				cores: s.effectiveCores(),
+			}
 		}
 	}
 }

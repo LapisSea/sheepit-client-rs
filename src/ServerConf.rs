@@ -4,9 +4,10 @@ use std::sync::Arc;
 use reqwest::{Client, IntoUrl, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::{CLIENT_VERSION, HwInfo, LongSummaryStatistics, net, RequestEndPoint, ServerConfig, SpeedTestTarget};
-use crate::conf::Config;
-use crate::net::{fromXml, postRequestForm};
+use crate::{ HwInfo, net, RequestEndPoint, ServerConfig};
+use crate::conf::ClientConfig;
+use crate::defs::*;
+use crate::net::*;
 use crate::ServerConf::StatusCodes::Unknown;
 
 const SERVER_CONF_ENDPOINT: &str = "/server/config.php";
@@ -28,16 +29,7 @@ struct SpeedTestTargetBuild {
 
 impl SpeedTestTargetBuild {
 	fn make(&self) -> Option<SpeedTestTarget> {
-		self.url.clone().map(|url| SpeedTestTarget {
-			url,
-			speedtest: Default::default(),
-			ping: LongSummaryStatistics {
-				count: 0,
-				sum: 0,
-				min: usize::MAX,
-				max: usize::MIN,
-			},
-		})
+		self.url.clone().map(SpeedTestTarget::new)
 	}
 }
 
@@ -147,7 +139,7 @@ impl ServerConfigBuild {
 	}
 }
 
-pub async fn fetchNew(httpClient: &Client, conf: &Config, hwInfo: &HwInfo::HwInfo) -> Result<ServerConfig, ConfError> {
+pub async fn fetchNew(httpClient: &Client, conf: &ClientConfig, hwInfo: &HwInfo::HwInfo) -> Result<ServerConfig, ConfError> {
 	let args = &[
 		("login", conf.login.clone()),
 		("password", conf.password.clone()),
@@ -169,7 +161,7 @@ pub async fn fetchNew(httpClient: &Client, conf: &Config, hwInfo: &HwInfo::HwInf
 	let url = format!("{}{}", conf.hostname, SERVER_CONF_ENDPOINT);
 	// println!("{:#?}", args);
 	
-	let xml = postRequestForm(httpClient, url, args, net::XML_CONTENT_O).await
+	let xml = postRequestForm(httpClient, url, args, XML_CONTENT_O).await
 		.map_err(|e| ConfError::IOError(e.to_string()))?;
 	// println!("Got back:\n{xml}");
 	
