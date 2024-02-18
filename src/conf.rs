@@ -1,6 +1,7 @@
-use std::fmt::{Display, Formatter, Pointer, write};
+use std::fmt::{Display, format, Formatter, Pointer, write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use crate::defs::BASE_URL;
@@ -36,6 +37,7 @@ pub struct ClientConfig {
 	pub computeMethod: ComputeMethod,
 	pub maxCpuCores: Option<u16>,
 	pub maxMemory: Option<u64>,
+	pub maxRenderTime: Option<Duration>,
 }
 
 impl ClientConfig {
@@ -74,6 +76,7 @@ pub struct ConfigBuild {
 	pub computeMethod: Option<ComputeMethod>,
 	pub maxCpuCores: Option<u16>,
 	pub maxMemory: Option<u64>,
+	pub maxRenderTime: Option<Duration>,
 }
 
 impl ConfigBuild {
@@ -96,6 +99,7 @@ impl ConfigBuild {
 			computeMethod: self.computeMethod.unwrap_or(ComputeMethod::Cpu),
 			maxCpuCores: self.maxCpuCores,
 			maxMemory: self.maxMemory,
+			maxRenderTime: self.maxRenderTime,
 		})
 	}
 }
@@ -167,6 +171,19 @@ pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> Result<ConfigBuild
 				let mem = str.parse().map_err(|e| format!("-memory must be a positive number but is: \"{str}\""))?;
 				if mem == 0 { return Err("-memory must be greater than 0".to_string()); }
 				res.maxMemory = Some(mem);
+			}
+			"-max-render-time" => {
+				let str = requireNext(args)?;
+				let time = str.parse::<u64>().map_err(|e| format!("-max-render-time <time> must be a positive number but is: \"{str}\""))?;
+				let str = requireNext(args)?;
+				let unitMul = match str.as_ref() {
+					"s" | "sec" => { 1 }
+					"m" | "min" => { 60 }
+					"h" | "hours" => { 60 * 60 }
+					_ => { return Err(format!("-max-render-time <time> <time-unit> must be one of [s, sec, m, min, h, hours] but is {str}")); }
+				};
+				
+				res.maxRenderTime = Some(Duration::from_secs(time * unitMul))
 			}
 			_ => { return Err(format!("Unrecognised option: \"{part}\"")); }
 		}

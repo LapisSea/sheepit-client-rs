@@ -13,11 +13,13 @@ mod files;
 mod utils;
 mod defs;
 mod process;
+mod serverCon;
 
 use std::{env};
 use std::borrow::Cow;
 use std::cmp::{max, min};
 use std::fmt::{Display, format};
+use std::io::Read;
 use std::iter::zip;
 use std::ops::{Deref};
 use std::path::{Path, PathBuf};
@@ -26,9 +28,10 @@ use std::ptr::write;
 use std::rc::Rc;
 use std::sync::{Arc, LockResult, Mutex};
 use std::time::Duration;
+use defer::defer;
 use futures_util::TryFutureExt;
 use indoc::indoc;
-use reqwest::{Client};
+use reqwest::{Client, RequestBuilder, Url};
 use reqwest::cookie::{Jar};
 use serde::{Deserialize, ser, Serialize};
 use tokio::fs;
@@ -36,18 +39,25 @@ use tokio::time::Instant;
 use crate::conf::{ComputeMethod, ClientConfig};
 use crate::ServerConf::ConfError;
 use rand::Rng;
-use rc_zip_tokio::{ArchiveHandle, HasCursor};
-use rc_zip_tokio::rc_zip::chrono::format;
-use rc_zip_tokio::rc_zip::error::Error;
+use rc_zip_tokio::{ArchiveHandle, HasCursor, rc_zip::{chrono::format, error::Error}};
+use regex::Regex;
 use reqwest::multipart::{Form, Part};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::process::Child;
+use tokio::sync::{mpsc, mpsc::Receiver, MutexGuard, TryLockError};
 use tokio::task::JoinHandle;
+use crate::defs::XML_CONTENT_O;
 use crate::job::{Chunk, ClientErrorType, Job, JobInfo, JobRequestStatus, JobResponse};
-use crate::net::{Req, RequestEndPoint, TransferStats};
+use crate::net::{bodyText, fromXml, Req, RequestEndPoint, requireContentType, TransferStats};
+use crate::process::{BlenderVersionStr, BlendProcessInfo, ProcStatus};
+use crate::serverCon::ServerConnection;
 use crate::utils::*;
 
+//H:\sheepit\sheepit\3616f03608a88c2c4186f9afd03722a4\rend.exe -t 3  --factory-startup --disable-autoexec -noaudio -b -P H:\sheepit\sheepit\pre_load_script_9866492119851812770.py H:\sheepit\sheepit\1\compute-method.blend -P H:\sheepit\sheepit\post_load_script_4425810924302583725.py --engine CYCLES -o H:\sheepit\sheepit\1_ -x 1 -f 0340
+//H:\test   \sheepit\3616f03608a88c2c4186f9afd03722a4\rend.exe -t 24 --factory-startup --disable-autoexec -noaudio -b -P H:\test   \sheepit\pre_load_script.py                     H:\test\sheepit\2\power-detection.blend -P H:\test\sheepit\post_load_script.py --engine CYCLES -o H:\test\sheepit\2_ -x 1 -f 0340
+
 #[derive(Debug, Serialize, Deserialize)]
-struct ServerConfig {
+pub struct ServerConfig {
 	publicKey: Option<String>,
 	speedTestUrls: Vec<net::SpeedTestTarget>,
 	requestJob: RequestEndPoint,
@@ -98,11 +108,17 @@ enum AppLoopAction {
 }
 
 fn main() -> ExitCode {
+	// let str="Fra:340 Mem:11.43M (Peak 13.74M) | Time:00:00.00 | Mem:1.01M, Peak:1.01M | Denoised_Scene, ViewLayer | Sample 0/1";
+	//
+	// let reg=Regex::new(r" (Rendered|Path Tracing Tile|Rendering|Sample) (\d+)\\s?/\s?(\d+)( Tiles| samples|,)*").unwrap();
+	// if let Some(captures) = reg.captures(str) {
+	// 	println!("{}\n{}",captures.get(1).unwrap().as_str(),captures.get(2).unwrap().as_str());
+	// }
+	//
+	// return ExitCode::SUCCESS;
 	let res = Work::block(start()).map_err(|e| format!("Aborting client because:\n{e}"));
 	match res {
-		Ok(_) => {
-			ExitCode::SUCCESS
-		}
+		Ok(_) => { ExitCode::SUCCESS }
 		Err(errMsg) => {
 			eprintln!("{errMsg}");
 			ExitCode::FAILURE
@@ -121,11 +137,10 @@ async fn start() -> ResultJMsg {
 		Work::spawn(async move { files::cleanWorkingDir(path.as_path()).await })
 	});
 	
-	let cookieJar = Arc::new(Jar::default());
 	let httpClient = Client::builder()
 		.connect_timeout(Duration::from_secs(30))
 		.timeout(Duration::from_secs(300))
-		.cookie_provider(cookieJar.clone())
+		.cookie_provider(Arc::new(Jar::default()))
 		.user_agent(format!(
 			"Rust{}",
 			rustc_version::version()
@@ -133,6 +148,7 @@ async fn start() -> ResultJMsg {
 				.unwrap_or_default()
 		))
 		.build().map_err(|e| format!("Failed to create http client: {e}"))?;
+	
 	
 	let hwInfo = awaitStrErr!(hwInfo)?;
 	
@@ -145,12 +161,14 @@ async fn start() -> ResultJMsg {
 	
 	'loginLoop:
 	loop {
+		let (uploadSender, uploadReceiver) = mpsc::channel(2);
 		let server = Arc::new(ServerConnection {
 			httpClient: httpClient.clone(),
-			serverConf: tryConnect(httpClient.clone().as_ref(), &mut clientConf, &hwInfo).await?,
+			serverConf: net::tryConnectToServer(httpClient.clone().as_ref(), &mut clientConf, &hwInfo).await?,
 			clientConf: clientConf.clone(),
 			hwInfo: hwInfo.clone(),
 			hashCache: Default::default(),
+			uploadSender,
 		});
 		
 		let state = Arc::new(Mutex::new(ClientState {
@@ -159,10 +177,14 @@ async fn start() -> ResultJMsg {
 			downloadStats: Default::default(),
 		}));
 		
-		if let Err(err) = init(state.clone(), server.clone()).await {
-			println!("Failed to init: {err}");
-			state.stop()?;
-		}
+		let tasks = match init(state.clone(), server.clone(), uploadReceiver).await {
+			Ok(t) => { t }
+			Err(err) => {
+				println!("Failed to init: {err}");
+				state.stop()?;
+				vec![]
+			}
+		};
 		
 		if let Some(cleanTask) = cleanTask {
 			awaitStrErr!(cleanTask).map_err(|e| format!("Failed to clean working dir because: {e}"))?;
@@ -193,6 +215,7 @@ async fn start() -> ResultJMsg {
 						break;
 					}
 					attempts += 1;
+					let _ = stopAndBlockTasks(server, tasks).await;
 					tSleep!(5);
 					continue 'loginLoop;
 				}
@@ -203,212 +226,142 @@ async fn start() -> ResultJMsg {
 			}
 		}
 		
+		let _ = stopAndBlockTasks(server.clone(), tasks).await;
 		cleanup(state, server.as_ref()).await;
 		return Ok(());
 	}
 }
 
-async fn tryConnect(httpClient: &Client, conf: &mut ClientConfig, hwInfo: &HwInfo::HwInfo) -> ResultMsg<ServerConfig> {
-	let mut attempt: u32 = 1;
-	loop {
-		match ServerConf::fetchNew(httpClient, conf, hwInfo).await {
-			Ok(sConf) => {
-				if let Some(pk) = &sConf.publicKey {
-					conf.password = pk.as_str().into();
-				}
-				println!("Server config loaded");
-				return Ok(sConf);
-			}
-			Err(e) => {
-				if let ConfError::FatalStatus(code) = &e {
-					return Err(format!("Failed to establish connection to server due to fatal error: {code}"));
-				}
-				let att = min(attempt, 9);
-				let time = att * att * 20;
-				let timeMsg = if attempt >= 10 {
-					"Some time..".to_string()
-				} else {
-					format!("{time} seconds")
+async fn stopAndBlockTasks(server: Arc<ServerConnection>, tasks: Vec<JoinHandle<()>>) {
+	let _ = server.uploadSender.send(FrameUploadMessage::End).await;
+	for x in tasks { let _ = x.await; }
+}
+
+async fn init(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, mut uploadReceiver: Receiver<FrameUploadMessage>) -> ResultMsg<Vec<JoinHandle<()>>> {
+	let keepAlive = {
+		let state = state.clone();
+		let server = server.clone();
+		Work::spawn(async move {
+			let state = state.deref();
+			let keepAlivePeriod = Duration::from_secs(15 * 60);
+			let mut lastPoke = Instant::now() - (keepAlivePeriod * 2);
+			loop {
+				let state = {
+					match state.lock() {
+						Ok(state) => { (*state).clone() }
+						Err(_) => { break; }
+					}
 				};
-				println!("Failed to establish connection to server on attempt {attempt}. Trying again in {timeMsg}.\n\tReason: {e}");
-				if attempt == 10 {
-					println!("We may be here for a while")
+				
+				if !state.shouldRun { break; }
+				let time = Instant::now() - lastPoke;
+				let toSleep = keepAlivePeriod.checked_sub(time).unwrap_or(Duration::ZERO).min(Duration::from_secs(2));
+				if toSleep > Duration::ZERO {
+					tokio::time::sleep(toSleep).await;
+					continue;
 				}
-				if attempt >= 10 {
-					tSleepRandRange!(time/2..=time);
+				
+				let server = server.clone();
+				if server.keepMeAlive(state).await {
+					lastPoke = Instant::now();
 				} else {
-					tSleep!(time);
+					tSleep!(60);
 				}
-				attempt += 1;
 			}
-		}
-	}
+			println!("Ended keepalive worker");
+		})
+	};
+	
+	let uploader = {
+		Work::spawn(async move {
+			while let Some(res) = uploadReceiver.recv().await {
+				match res {
+					FrameUploadMessage::Frame(frame) => {
+						uploadFrame(server.httpClient.as_ref(), &frame).await.warn();
+					}
+					FrameUploadMessage::End => {
+						break;
+					}
+				}
+			}
+			println!("Ended uploader worker");
+		})
+	};
+	
+	Ok(vec![keepAlive, uploader])
 }
 
-struct ServerConnection {
-	httpClient: Arc<Client>,
-	serverConf: ServerConfig,
-	clientConf: ClientConfig,
-	hwInfo: HwInfo::HwInfo,
-	hashCache: fmd5::HashCache,
-}
-
-macro_rules! servReq {
-    ($server:expr, $endpoint:ident,$method:ident) => {
-        $server.serverConf.$endpoint.$method(&$server.httpClient, &$server.clientConf.hostname)
-    };
-}
-
-impl ServerConnection {
-	pub fn effectiveCores(&self) -> u16 {
-		let maxCores = self.hwInfo.cores;
-		if let Some(maxCoresConf) = self.clientConf.maxCpuCores {
-			max(if maxCores == 1 { 1 } else { 2 }, min(maxCoresConf, maxCores))
-		} else {
-			maxCores
+async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
+	async fn doUpload(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
+		let url = Url::parse(&frame.validationUrl).map_err(|e| e.to_string())?;
+		let queryParts = url.query_pairs();
+		
+		let mut builder = httpClient.post(url)
+			.query(&[
+				("rendertime", frame.renderTime.as_secs().to_string()),
+				("memoryused", frame.memoryUsed.to_string()),
+			]);
+		
+		if frame.speedSamplesRendered > 0f32 {
+			builder = builder.query(&[
+				("speedsamples", frame.speedSamplesRendered.to_string()),
+			]);
 		}
-	}
-	
-	async fn requestJob(&self, state: Arc<Mutex<ClientState>>) -> ResultMsg<JobResponse> {
-		println!("Requesting job");
+		let path = frame.output.as_path();
+		let ext = path.extension().map(|s| s.to_string_lossy().to_string()).unwrap_or("png".to_string());
 		
-		let cores = self.effectiveCores();
+		let fileLen = fs::metadata(path).await.map_err(|e| "Could not open file {e}")?.len();
+		let file = fs::File::open(path).await.map_err(|e| "Could not open file {e}")?;
 		
-		let maxMemory = {
-			let gig = 1024 * 1024;
-			let freeMemory = max(HwInfo::getSystemFreeMemory(), gig) - gig;
-			min(self.clientConf.maxMemory.unwrap_or(u64::MAX), freeMemory)
-		};
-		
-		let (downloadRate, uploadRate) = state.access(|state| {
-			(state.downloadStats.toRate(), "0")
-		})?;
-		
-		let res = servReq!(self,requestJob,post).query(&[
-			("computemethod", match self.clientConf.computeMethod {
-				ComputeMethod::CpuGpu => { "0" }
-				ComputeMethod::Cpu => { "1" }
-				ComputeMethod::Gpu => { "2" }
-			}.to_string()),
-			("network_dl", downloadRate.to_string()),
-			("network_up", uploadRate.to_string()),
-			("cpu_cores", cores.to_string()),
-			("ram_max", maxMemory.to_string()),
-			("rendertime_max", "0".to_string()),//TODO
-		]).send().await?.xml::<JobResponse>().await;
-		match &res {
-			Ok(res) => {
-				println!("Requested job\n{:#?}", res);
-			}
-			Err(err) => {
-				println!("Failed to request job: {err}");
-			}
-		}
-		res
-	}
-	
-	async fn downloadBinary(&self, job: &JobInfo) -> ResultMsg<TransferStats> {
-		let md5 = job.rendererInfo.md5.as_str();
-		let req = servReq!(self,downloadBinary,get).query(&[("job", &job.id)]);
-		
-		net::downloadFile(&self.clientConf.rendererArchivePath(job), req, md5, self.hashCache.clone()).await
-	}
-	
-	async fn downloadChunk(&self, chunk: Chunk) -> ResultMsg<TransferStats> {
-		let md5 = chunk.md5.as_ref();
-		let req = servReq!(self,downloadChunk,get).query(&[("chunk", &chunk.id)]);
-		
-		net::downloadFile(&self.clientConf.chunkPath(&chunk), req, md5, self.hashCache.clone()).await
-	}
-	
-	async fn keepMeAlive(&self, state: ClientState) -> bool {
-		println!("keepMeAlive start");
-		let res = servReq!(self,keepMeAlive,get).query(&[
-			("paused", state.paused)
-		]).send().await;
-		match res {
-			Ok(ok) => {
-				println!("keepMeAlive ok");
-				true
-			}
-			Err(err) => {
-				eprintln!("keepMeAlive error: {err}");
-				false
-			}
-		}
-	}
-	
-	async fn logout(&self) -> ResultJMsg {
-		println!("Logging out");
-		let res = servReq!(self,logout,get).send().await.map(|_| ());
-		if res.is_ok() {
-			println!("Logged out");
-		}
-		res
-	}
-	
-	fn speedTestAnswer(&self) {
-		todo!()
-	}
-	
-	async fn error(&self, status: ClientErrorType, log: String) -> ResultJMsg {
-		let path = Path::new("/tmp/err.txt");
-		let ext = path.extension().unwrap().to_string_lossy();
-		
-		let file = Cow::Owned(log.as_bytes().to_vec());
-		let file = Part::bytes(file);
-		let url = self.serverConf.error.makeUrl(&self.clientConf.hostname);
-		let url = url.as_str();
-		let form = Form::new()
+		builder = builder.multipart(Form::new()
 			.part(
-				path.file_name().unwrap_or_default().to_string_lossy(),
-				file
-					.mime_str(match ext.deref() {
-						"txt" => { mime::TEXT_PLAIN }
-						_ => { return Err(format!("Could not find mime type of: {ext}")); }
-					}.as_ref()).unwrap()
-					.file_name(path.to_string_lossy().to_string()),
-			);
-		let res = self.httpClient.post(url).multipart(form);
-		let res = res.query(&[
-			("type", (status as u32).to_string())
-		]);
-		let _ = net::send(url, res).await?;
+				"file",
+				Part::stream_with_length(file, fileLen)
+					.mime_str(&format!("image/{ext}")).unwrap()
+					.file_name(path.file_name().unwrap_or_default().to_string_lossy().to_string()),
+			));
+		
+		let response = net::send(&frame.validationUrl, builder).await?;
+		// println!("{:#?}", response);
+		
+		requireContentType(defs::XML_CONTENT_O, &response)?;
+		let xml = bodyText(&frame.validationUrl, response).await?;
+		#[derive(Deserialize)]
+		struct JobValidation {
+			status: i32,
+		}
+		let status = fromXml::<JobValidation>(xml.as_str())?.status;
+		if status != 0 {
+			return Err(format!("Got back validation code {status}"));//TODO handle codes properly
+		}
+		
 		Ok(())
 	}
-}
-
-async fn init(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>) -> ResultJMsg {
-	Work::spawn(async move {
-		let state = state.deref();
-		let keepAlivePeriod = Duration::from_secs(15 * 60);
-		let mut lastPoke = Instant::now() - (keepAlivePeriod * 2);
-		loop {
-			let state = {
-				match state.lock() {
-					Ok(state) => { (*state).clone() }
-					Err(_) => { break; }
-				}
-			};
-			
-			if !state.shouldRun { break; }
-			let time = Instant::now() - lastPoke;
-			let toSleep = keepAlivePeriod.checked_sub(time).unwrap_or(Duration::ZERO) / 2;
-			if toSleep > Duration::ZERO {
-				tokio::time::sleep(toSleep).await;
-				continue;
-			}
-			
-			let server = server.clone();
-			if server.keepMeAlive(state).await {
-				lastPoke = Instant::now();
-			} else {
-				tSleep!(60);
-			}
+	defer!({
+		std::fs::remove_file(&frame.output).map_err(|e| format!("Failed to delete {} because: {e}", &frame.output.to_string_lossy())).warn();
+		if let Some(f)=&frame.outputPreview{
+			std::fs::remove_file(&f).map_err(|e| format!("Failed to delete {} because: {e}", &f.to_string_lossy())).warn();
 		}
 	});
 	
-	Ok(())
+	println!("Uploading {:#?}", frame);
+	
+	let mut attempt = 1;
+	let mut timeToSleep = 22;
+	
+	loop {
+		if let Err(msg) = swait!(doUpload(httpClient, frame), "Failed to upload frame") {
+			if attempt == 3 {
+				return Err(msg);
+			}
+			println!("{msg} (attempt {attempt})");
+		} else { return Ok(()); }
+		
+		println!("Failed to upload frame. trying in {timeToSleep} seconds");
+		tSleep!(timeToSleep);
+		attempt += 1;
+		timeToSleep *= 2;
+	}
 }
 
 async fn run(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>) -> AppLoopAction {
@@ -496,60 +449,214 @@ async fn execute_job(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnectio
 	downloadJobFiles(state, server.clone(), job.clone()).await?;
 	println!("Preparing work directory");
 	prepareWorkingDirectory(server.clone(), job.clone()).await?;
+	let serverC = server.clone();
+	let jobc = job.clone();
+	deferAsync!({
+		let scenePath = serverC.clientConf.scenePath(&jobc.info);
+		swait!(files::deleteDirDeep(&scenePath), "Failed to delete scene directory").warn();
+	});
 	
-	let res = render(job.clone(), server.clone()).await;
+	match render(job.clone(), server.clone()).await {
+		Ok(res) => {
+			if job.info.synchronousUpload {
+				uploadFrame(server.httpClient.as_ref(), &res).await?;
+			} else {
+				server.uploadSender.send(FrameUploadMessage::Frame(res)).await.map_err(|e| e.to_string())?;
+			}
+		}
+		Err(err) => {
+			println!("{:?}", err);
+		}
+	}
 	
-	let scenePath = server.clientConf.scenePath(&job.info);
-	swait!(files::deleteDirDeep(scenePath.as_ref()), "Failed to delete scene directory")?;
-	// swait!(tokio::fs::remove_file(server.clientConf.workPath.join("pre_load_script.py")), "Failed to delete script").warn();
-	// swait!(tokio::fs::remove_file(server.clientConf.workPath.join("post_load_script.py")), "Failed to delete script").warn();
-	
-	res
+	Ok(())
 }
 
-async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> ResultJMsg {
-	
-	let mut command=process::createBlenderCommand(job.clone(),server.clone()).await?;
-	command.stdout(Stdio::piped());
-	command.kill_on_drop(true);
+
+enum FrameUploadMessage {
+	Frame(RenderResult),
+	End,
+}
+
+#[derive(Debug)]
+struct RenderResult {
+	validationUrl: String,
+	output: PathBuf,
+	outputPreview: Option<PathBuf>,
+	memoryUsed: u64,
+	renderTime: Duration,
+	speedSamplesRendered: f32,
+}
+
+#[derive(Debug)]
+enum RenderError {
+	Unknown(String),
+	NoOutputFile,
+	RendererCrashed,
+	RendererMissingLibraries,
+	ValidationFailed,
+}
+
+async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderResult, RenderError> {
+	let (mut command, files) = process::createBlenderCommand(job.clone(), server.clone()).await.map_err(RenderError::Unknown)?;
+	defer!({
+		for file in files{
+			std::fs::remove_file(&file).map_err(|e|format!("Failed to delete script {} because: {e}",file.to_string_lossy())).warn();
+		}
+	});
 	
 	println!("{:#?}", command);
 	
-	let mut blenderProc = command.spawn().map_err(|e| e.to_string())?;
+	let mut blenderProc = command.spawn().map_err(|e| RenderError::Unknown(e.to_string()))?;
+	let procInfo = Arc::new(Mutex::new(BlendProcessInfo::default()));
 	
-	let stdin=BufReader::new(blenderProc.stdout.take().ok_or("Failed to acquire stdout")?);
-	let stdinReader:JoinHandle<ResultJMsg>=Work::spawn(async move {
-		let mut lines =stdin.lines();
-		loop {
-			let l=swait!(lines.next_line(),"failed to read std line")?;
-			if l.is_none() {break;}
-			let l=l.unwrap_or_default();
+	fn scanOutput<T: AsyncRead + Unpin + Send + Sync + 'static>(procInfo: Arc<Mutex<BlendProcessInfo>>, stream: T) -> JoinHandle<ResultJMsg> {
+		Work::spawn(async move {
+			let mut lines = BufReader::new(stream).lines();
+			loop {
+				let l = swait!(lines.next_line(),"failed to read output line")?;
+				if l.is_none() { break; }
+				let l = l.unwrap_or_default();
+				
+				let exited = procInfo.access(|procInfo| {
+					process::observeBlendStdout(procInfo, l);
+					procInfo.status != ProcStatus::Running
+				})?;
+				if exited { break; }
+			}
 			
-			println!("BLENDER: {l}");
+			Ok(())
+		})
+	}
+	
+	blenderProc.stdout
+		.take()
+		.map(|s| scanOutput(procInfo.clone(), s))
+		.ok_or(RenderError::Unknown("Failed to acquire stdout".to_string()))?;
+	
+	blenderProc.stderr
+		.take()
+		.map(|s| scanOutput(procInfo.clone(), s))
+		.ok_or(RenderError::Unknown("Failed to acquire stderr".to_string()))?;
+	
+	let memoryWatch: JoinHandle<ResultJMsg> = {
+		let pid = blenderProc.id().ok_or(RenderError::Unknown("Failed to get process PID".to_string()))?;
+		let procInfo = procInfo.clone();
+		Work::spawn(async move {
+			loop {
+				tSleepMs!(200);
+				let mem = HwInfo::getProcessWorkingSet(pid);
+				let exited = procInfo.access(|procInfo| {
+					if procInfo.status == ProcStatus::Running {
+						if let Some(mem) = mem.warn() {
+							procInfo.memUsage = mem;
+							procInfo.maxMemUsage = max(procInfo.maxMemUsage, mem);
+						}
+						true
+					} else { false }
+				})?;
+				if exited { break; }
+			}
+			Ok(())
+		})
+	};
+	
+	let blenderProc = Arc::new(tokio::sync::Mutex::new(blenderProc));
+	
+	let maxRenderTimeTrigger: JoinHandle<ResultJMsg> = {
+		let timeout = server.clientConf.maxRenderTime;
+		let blenderProc = blenderProc.clone();
+		let procInfo = procInfo.clone();
+		Work::spawn(async move {
+			let timeout = match timeout {
+				None => { return Ok(()); }
+				Some(t) => { t }
+			};
+			let timeout = timeout.checked_add(Duration::from_secs(2)).unwrap_or(timeout);
 			
+			tokio::time::sleep(timeout).await;
+			
+			let shouldKill = procInfo.access(|procInfo| {
+				if procInfo.status == ProcStatus::Running {
+					procInfo.status = ProcStatus::TookTooLong;
+					true
+				} else {
+					false
+				}
+			})?;
+			if shouldKill {
+				let mut blenderProc = blenderProc.lock().await;
+				blenderProc.kill().await.map_err(|e| format!("Failed to kill blender because: {e}"))
+			} else { Ok(()) }
+		})
+	};
+	
+	loop {
+		let mut blenderProc = match blenderProc.try_lock() {
+			Ok(l) => { l }
+			Err(e) => {
+				continue;
+			}
+		};
+		match blenderProc.try_wait() {
+			Ok(Some(status)) => {
+				if !status.success() {
+					// procInfo.access(|i| i.status = ProcStatus::Crashed);TODO signal crash
+					return Err(RenderError::RendererCrashed);
+				}
+				break;
+			}
+			Ok(None) => {}//Alive
+			Err(e) => { return Err(RenderError::Unknown(format!("There was en error pooling blender process status: {e}"))); }
 		}
-		
-		Ok(())
-	});
+	}
 	
+	let procInfo = procInfo.access(|i| {
+		i.status = ProcStatus::ExitedOk;
+		i.clone()
+	}).map_err(RenderError::Unknown)?;
 	
-	let status=swait!(blenderProc.wait(),"failed to wait for blender")? ;
-	if !status.success() { return Err(format!("Blender crashed with status {status}")); }
+	maxRenderTimeTrigger.abort();
 	
-	// loop {
-	// 	tokio::time::sleep(Duration::from_millis(500)).await;
-	//
-	// 	match blenderProc.try_wait() {
-	// 		Ok(Some(status)) => {
-	// 			break;
-	// 		}
-	// 		Ok(None) => println!("timeout, process is still alive"),
-	// 		Err(e) => { return Err(format!("Error while monitoring process: {e}")); }
-	// 	}
-	// }
+	println!("{:#?}", procInfo);
 	
-	Err("I don't wanna work".to_string())
-	// Ok(())
+	let mut outputFiles = vec![];
+	let nameStart = format!("{}_{}.", job.info.id, job.info.frameNumber);
+	let mut files = swait!(fs::read_dir(&server.clientConf.workPath), "Failed to read work directory").map_err(RenderError::Unknown)?;
+	while let Ok(Some(file)) = files.next_entry().await {
+		let name = file.file_name();
+		if !name.to_string_lossy().starts_with(&nameStart) { continue; }
+		outputFiles.push(file.path());
+		break;
+	}
+	
+	let (output, outputPreview) = match outputFiles.as_slice() {
+		[] => { return Err(RenderError::NoOutputFile); }
+		[output] => {
+			(output.clone(), None)
+		}
+		[output1, output2] => {
+			if &output1.extension().unwrap_or_default().to_string_lossy() != "exr" {
+				(output1.clone(), Some(output2.clone()))
+			} else {
+				(output2.clone(), Some(output1.clone()))
+			}
+		}
+		_ => {
+			files::cleanWorkingDir(&server.clientConf.workPath).await.warn();
+			return Err(RenderError::NoOutputFile);
+		}
+	};
+	
+	Ok(RenderResult {
+		renderTime: procInfo.compositStart.ok_or(RenderError::Unknown("No composit start encountered".to_string()))?
+			.duration_since(procInfo.renderStart.ok_or(RenderError::Unknown("No render start encountered".to_string()))?),
+		memoryUsed: procInfo.maxMemUsage,
+		output,
+		outputPreview,
+		validationUrl: job.info.validationUrl.clone(),
+		speedSamplesRendered: procInfo.speedSamplesRendered,
+	})
 }
 
 async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -> ResultJMsg {

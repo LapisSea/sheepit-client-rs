@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use rc_zip_tokio::{ArchiveHandle, ReadZip};
 use tokio::fs;
 use tokio::io::{AsyncWriteExt, Join};
 use tokio::task::JoinHandle;
+use crate::utils::Warn;
 use crate::Work;
 
 pub async fn cleanWorkingDir(path: &Path) -> io::Result<()> {
@@ -20,8 +22,16 @@ pub async fn cleanWorkingDir(path: &Path) -> io::Result<()> {
 	
 	while let Some(entry) = dir.next_entry().await? {
 		let path = entry.path().clone();
-		if !fs::metadata(&path).await?.is_dir() { continue; }
-		tasks.push(Work::spawn(async move { deleteDirDeep(path.as_path()).await }));
+		if !fs::metadata(&path).await?.is_dir() {
+			if match path.extension() {
+				Some(ext) => { ext.to_string_lossy() != "wool" }
+				None => { true }
+			} {
+				tasks.push(Work::spawn(async move { fs::remove_file(&path).await }));
+			}
+		} else {
+			tasks.push(Work::spawn(async move { deleteDirDeep(path.as_path()).await }));
+		}
 	}
 	
 	for task in tasks {

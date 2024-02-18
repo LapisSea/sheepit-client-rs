@@ -1,7 +1,8 @@
 use machineid_rs::{Encryption, HWIDComponent, IdBuilder};
 use raw_cpuid::CpuId;
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 use tokio::task::JoinHandle;
+use crate::utils::ResultMsg;
 use crate::Work;
 
 
@@ -118,4 +119,17 @@ pub fn getSystemFreeMemory() -> u64 {
 		.with_memory(MemoryRefreshKind::new().with_ram())
 	);
 	sys.free_memory() / 1024
+}
+
+
+pub fn getProcessWorkingSet(pid: u32) -> ResultMsg<u64> {
+	let pid = Pid::from_u32(pid);
+	let mut sys = System::new();
+	sys.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+	let proc = sys.process(pid).ok_or(format!("Could not find process {pid}"))?;
+	if proc.memory() == 0 {
+		Err(format!("Could not retieve process memory: {pid}"))
+	} else {
+		Ok(proc.memory() / 1024)
+	}
 }

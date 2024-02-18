@@ -1,15 +1,24 @@
-use std::env;
+use std::{env, io};
+use std::io::{BufRead, Read};
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use indoc::indoc;
+use lazy_static::lazy_static;
+use rc_zip_tokio::rc_zip::chrono::format::Numeric::Timestamp;
+use regex::Regex;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use crate::defs::POST_LOAD_NOTIFICATION;
 use crate::job::Job;
-use crate::ServerConnection;
+use crate::{defs, ServerConnection};
 use crate::utils::{ResultJMsg, ResultMsg};
 
-pub async fn createBlenderCommand(job: Arc<Job>, server: Arc<ServerConnection>) -> ResultMsg<Command> {
+pub async fn createBlenderCommand(job: Arc<Job>, server: Arc<ServerConnection>) -> ResultMsg<(Command, Vec<PathBuf>)> {
 	let tmpDir = &server.clientConf.tmpDir();
+	let mut files = vec![];
 	
 	let mut command = Command::new(server.clientConf.rendererPathExecutable(&job.info));
 	command
@@ -44,6 +53,7 @@ pub async fn createBlenderCommand(job: Arc<Job>, server: Arc<ServerConnection>) 
 				}
 				{
 					let path = server.clientConf.workPath.join("pre_load_script.py");
+					files.push(path.clone());
 					let _ = fs::remove_file(&path).await;
 					let file = &mut swait!(fs::File::create(&path),"Failed to create pre_load_script")?;
 					write(file, indoc! {r#"
@@ -73,14 +83,15 @@ pub async fn createBlenderCommand(job: Arc<Job>, server: Arc<ServerConnection>) 
 				
 				{
 					let path = server.clientConf.workPath.join("post_load_script.py");
+					files.push(path.clone());
 					let _ = fs::remove_file(&path).await;
 					let file = &mut swait!(fs::File::create(&path),"Failed to create pre_load_script")?;
 					write(file, &job.info.script).await?;
-					write(file, indoc! {r#"
+					write(file, &indoc! {r#"
 						import sys
-						print('" + POST_LOAD_NOTIFICATION + "')
+						print('{}')
 						sys.stdout.flush()
-						"#}).await?;
+						"#}.replace("{}", POST_LOAD_NOTIFICATION)).await?;
 					//Core script
 					write(file, &format!(
 						"sheepit_set_compute_device(\"{}\", \"{}\", \"{}\")\n",
@@ -117,5 +128,110 @@ pub async fn createBlenderCommand(job: Arc<Job>, server: Arc<ServerConnection>) 
 		}
 	}
 	
-	Ok(command)
+	command.stdout(Stdio::piped());
+	command.stderr(Stdio::piped());
+	command.kill_on_drop(true);
+	
+	Ok((command, files))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcStatus {
+	Running,
+	ExitedOk,
+	Crashed,
+	TookTooLong,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlenderVersionStr {
+	shortVersion: String,
+	longVersion: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlendProcessInfo {
+	pub prepStart: Option<Instant>,
+	pub renderStart: Option<Instant>,
+	pub compositStart: Option<Instant>,
+	pub status: ProcStatus,
+	pub memUsage: u64,
+	pub maxMemUsage: u64,
+	pub blenderVersion: Option<BlenderVersionStr>,
+	pub progress: f32,
+	pub speedSamplesRendered: f32,
+}
+
+impl Default for BlendProcessInfo {
+	fn default() -> Self {
+		Self {
+			prepStart: None,
+			renderStart: None,
+			compositStart: None,
+			status: ProcStatus::Running,
+			memUsage: 0,
+			maxMemUsage: 0,
+			blenderVersion: None,
+			progress: 0.0,
+			speedSamplesRendered: 0.0,
+		}
+	}
+}
+
+lazy_static! {
+	static ref BLENDER_VERSION: Regex = Regex::new(r"Blender (([0-9]{1,3}\.[0-9]{0,3}).*)$").unwrap();
+	static ref RENDER_PROGRESS: Regex = Regex::new(r" (Rendered|Path Tracing Tile|Rendering|Sample) (\d+)\s?/\s?(\d+)( Tiles| samples|,)*").unwrap();
+	static ref BEGIN_POST_PROCESSING: Regex = Regex::new(r"^Fra:\d* \w*(.)* \| (Compositing|Denoising|Finished)").unwrap();
+	static ref SAMPLE_SPEED: Regex = Regex::new(r"^Rendered (\d+) samples in ([\d.]+) seconds$").unwrap();
+}
+
+pub fn observeBlendStdout(info: &mut BlendProcessInfo, line: String) {
+	macro_rules! timeIt {
+    ($info:expr, $var: ident) => {
+		$info.$var = $info.$var.or_else(|| Some(Instant::now()));
+    };
+}
+	
+	let line = line.trim();
+	if info.blenderVersion.is_none() {
+		if let Some(captures) = BLENDER_VERSION.captures(line) {
+			info.blenderVersion = Some(BlenderVersionStr {
+				longVersion: captures.get(1).unwrap().as_str().to_string(),
+				shortVersion: captures.get(2).unwrap().as_str().to_string(),
+			});
+			println!("## {line}");
+		}
+	}
+	
+	if line == POST_LOAD_NOTIFICATION {
+		timeIt!(info, prepStart);
+		println!("## {line}");
+	}
+	
+	if let Some(captures) = RENDER_PROGRESS.captures(line) {
+		let tileJustProcessed = captures.get(2).and_then(|s| s.as_str().parse::<i32>().ok());
+		let totalTilesInJob = captures.get(3).and_then(|s| s.as_str().parse::<i32>().ok());
+		if let (Some(tileJustProcessed), Some(totalTilesInJob)) = (tileJustProcessed, totalTilesInJob) {
+			timeIt!(info, renderStart);
+			let progress = (tileJustProcessed as f32 * 100f32) / totalTilesInJob as f32;
+			info.progress = progress;
+			println!("## {line}");
+		}
+	}
+	
+	if BEGIN_POST_PROCESSING.captures(line).is_some() {
+		timeIt!(info, compositStart);
+		println!("## {line}");
+	}
+	
+	if let Some(captures) = SAMPLE_SPEED.captures(line) {
+		let amount = captures.get(1).and_then(|s| s.as_str().parse::<i32>().ok());
+		let duration = captures.get(2).and_then(|s| s.as_str().parse::<f32>().ok());
+		if let (Some(amount), Some(duration)) = (amount, duration) {
+			if duration != 0f32 {
+				info.speedSamplesRendered = amount as f32 / duration;
+				println!("## {line}");
+			}
+		}
+	}
 }

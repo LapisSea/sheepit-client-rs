@@ -139,50 +139,41 @@ pub struct JobInfo {
 	pub synchronousUpload: bool,
 	pub rendererInfo: RendererInfos,
 }
+
 #[derive(Debug)]
 pub struct JobConfig {
 	pub computeMethod: ComputeMethod,
-	pub cores: u16
+	pub cores: u16,
 }
 
 #[derive(Debug)]
 pub struct Job {
 	pub info: JobInfo,
-	pub conf: JobConfig
-	// pub outputImagePath: String,
-	// pub previewImagePath: String,
-	// pub outputImageSize: u64,
-	// pub blenderShortVersion: String,
-	// pub blenderLongVersion: String,
-	// pub speedSamplesRendered: f32,
-	// pub render: RenderProcess,
-	// pub askForRendererKill: bool,
-	// pub userBlockJob: bool,
-	// pub serverBlockJob: bool,
+	pub conf: JobConfig,
 }
 
 impl From<(RenderTask, &ServerConnection)> for Job {
-	fn from((t,s): (RenderTask, &ServerConnection)) -> Self {
+	fn from((t, s): (RenderTask, &ServerConnection)) -> Self {
 		let info = JobInfo {
 			id: t.id,
 			frameNumber: t.frame,
-			path: t.path.replace("/", std::path::MAIN_SEPARATOR.to_string().as_str()),
+			path: t.path.replace('/', std::path::MAIN_SEPARATOR.to_string().as_str()),
 			useGPU: t.useGpu == 1,
-			validationUrl: t.validationUrl,
+			validationUrl: urlencoding::decode(&t.validationUrl).map(|e| e.to_string()).unwrap_or(t.validationUrl),
 			script: t.script,
 			archiveChunks: t.chunks.chunks,
 			name: t.name,
 			password: t.password,
-			synchronousUpload: t.synchronousUpload.eq("1"),
+			synchronousUpload: t.synchronousUpload == "1",
 			rendererInfo: t.rendererInfos,
 		};
 		
 		Job {
 			info,
-			conf:JobConfig{
+			conf: JobConfig {
 				computeMethod: ComputeMethod::Cpu,
 				cores: s.effectiveCores(),
-			}
+			},
 		}
 	}
 }

@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::fmt::Display;
 use std::fs::File;
 use std::io;
@@ -10,8 +11,13 @@ use reqwest::{Client, IntoUrl, RequestBuilder, Response, Url};
 use serde::{de, Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
+use crate::conf::ClientConfig;
 use crate::fmd5::{checkMd5, computeFileHash, HashCache};
 use crate::defs::*;
+use crate::{HwInfo, ServerConf, ServerConfig, tSleep, tSleepRandRange};
+use crate::ServerConf::ConfError;
+use crate::utils::ResultMsg;
+use rand::Rng;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LongSummaryStatistics {
@@ -29,8 +35,8 @@ pub struct SpeedTestTarget {
 }
 
 impl SpeedTestTarget {
-	pub fn new(url:String)->Self{
-		Self{
+	pub fn new(url: String) -> Self {
+		Self {
 			url,
 			speedtest: Default::default(),
 			ping: LongSummaryStatistics {
@@ -115,19 +121,19 @@ impl Req {
 		fromXml(xml.as_str())
 	}
 	
-	pub fn response(self) -> Result<Response, String> {
+	pub fn response(self) -> ResultMsg<Response> {
 		let res = self.res;
 		res.error_for_status_ref().map_err(|e| e.to_string())?;
 		Ok(res)
 	}
 }
 
-pub async fn send<U: Display>(url: U, res: RequestBuilder) -> Result<Response, String> {
+pub async fn send<U: Display>(url: U, res: RequestBuilder) -> ResultMsg<Response> {
 	res.send().await.and_then(|res| res.error_for_status())
 		.map_err(|e| format!("Could not get an ok response from {url} because: {e}"))
 }
 
-async fn bodyText<U: Display>(url: U, res: Response) -> Result<String, String> {
+pub async fn bodyText<U: Display>(url: U, res: Response) -> Result<String, String> {
 	res.text().await.map_err(|e| format!("Failed to get body of {url} because: {e}"))
 }
 
@@ -272,4 +278,42 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache:
 	println!("\"{pathStr}\" downloaded!");
 	
 	Ok(start.checked_duration_since(end).map(|time| TransferStats { bytes: bytesDownloaded, time }).unwrap_or_default())
+}
+
+
+pub async fn tryConnectToServer(httpClient: &Client, conf: &mut ClientConfig, hwInfo: &HwInfo::HwInfo) -> ResultMsg<ServerConfig> {
+	let mut attempt: u32 = 1;
+	loop {
+		match ServerConf::fetchNew(httpClient, conf, hwInfo).await {
+			Ok(sConf) => {
+				if let Some(pk) = &sConf.publicKey {
+					conf.password = pk.as_str().into();
+				}
+				println!("Server config loaded");
+				return Ok(sConf);
+			}
+			Err(e) => {
+				if let ConfError::FatalStatus(code) = &e {
+					return Err(format!("Failed to establish connection to server due to fatal error: {code}"));
+				}
+				let att = min(attempt, 9);
+				let time = att * att * 20;
+				let timeMsg = if attempt >= 10 {
+					"Some time..".to_string()
+				} else {
+					format!("{time} seconds")
+				};
+				println!("Failed to establish connection to server on attempt {attempt}. Trying again in {timeMsg}.\n\tReason: {e}");
+				if attempt == 10 {
+					println!("We may be here for a while")
+				}
+				if attempt >= 10 {
+					tSleepRandRange!(time/2..=time);
+				} else {
+					tSleep!(time);
+				}
+				attempt += 1;
+			}
+		}
+	}
 }
