@@ -67,8 +67,10 @@ impl ServerConnection {
 		]).send().await?.xml::<JobResponse>().await;
 		match &res {
 			Ok(res) => {
-				if let Some(ref name) = res.renderTask.as_ref().map(|t| t.name.as_str()) {
-					println!("Requested job: {name}");
+				if let Some(ref task) = res.renderTask {
+					let mut task = (*task).clone();
+					task.script = "<stuff>".into();
+					println!("Requested job: {:#?}", task);
 				}
 			}
 			Err(err) => {

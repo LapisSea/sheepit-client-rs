@@ -1,17 +1,17 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io;
+use std::io::{Cursor, ErrorKind, Read};
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::{Mutex};
-use positioned_io::RandomAccessFile;
-use rc_zip_tokio::rc_zip::parse::EntryKind;
-use rc_zip_tokio::{ArchiveHandle, ReadZip};
+use std::sync::{Arc, Mutex};
 use tokio::fs;
 use tokio::io::{AsyncWriteExt, Join};
 use tokio::task::JoinHandle;
-use crate::utils::Warn;
+use zip::read::ZipFile;
+use zip::ZipArchive;
+use crate::utils::{MutRes, Warn};
 use crate::Work;
 
 pub async fn cleanWorkingDir(path: &Path) -> io::Result<()> {
@@ -105,30 +105,32 @@ async fn cleanupTasks(tasks: &mut Vec<JoinHandle<io::Result<()>>>) -> io::Result
 	Ok(())
 }
 
-pub async fn unzipMem(zipFile: Vec<u8>, destFolder: &Path) -> io::Result<()> {
-	fs::create_dir_all(&destFolder).await?;
+pub fn unzipMem(zipFile: Vec<u8>, destFolder: &Path, password: Option<&[u8]>) -> io::Result<()> {
+	std::fs::create_dir_all(&destFolder)?;
 	println!("Unzipping from {} bytes", zipFile.len());
-	let archive = zipFile.read_zip().await?;
-	unzipWorker(&archive, destFolder, Default::default(), 1, 0).await?;
-	drop(archive);
+	let mut data = Cursor::new(zipFile.as_slice());
+	let mut archive = ZipArchive::new(&mut data)?;
+	let password = password.map(|p| p.to_owned());
+	unzipWorker(&mut archive, password, destFolder, Default::default(), 1, 0)?;
 	println!("Unzipped  from {} bytes", zipFile.len());
 	Ok(())
 }
 
-pub async fn unzip(zipFile: &Path, destFolder: &Path) -> io::Result<()> {
+pub async fn unzip(zipFile: &Path, destFolder: &Path, password: Option<&[u8]>) -> io::Result<()> {
 	fs::create_dir_all(destFolder).await?;
 	println!("Unzipping {}", &zipFile.to_string_lossy());
 	let mut tasks: Vec<JoinHandle<io::Result<()>>> = vec![];
-	let workerCount = 4;
+	let workerCount = 8;
 	let folders: Arc<Mutex<HashSet<PathBuf>>> = Default::default();
 	for i in 0..workerCount {
 		let zipFile = zipFile.to_owned();
 		let destFolder = destFolder.to_owned();
 		let folders = folders.clone();
+		let password = password.map(|p| p.to_owned());
 		let task = Work::spawn(async move {
-			let file = Arc::new(RandomAccessFile::open(zipFile)?);
-			let archive = file.read_zip().await?;
-			unzipWorker(&archive, destFolder.as_path(), folders, workerCount, i).await
+			let file = std::fs::File::open(zipFile)?;
+			let mut archive = ZipArchive::new(file)?;
+			unzipWorker(&mut archive, password, destFolder.as_path(), folders, workerCount, i)
 		});
 		tasks.push(task);
 	}
@@ -139,58 +141,44 @@ pub async fn unzip(zipFile: &Path, destFolder: &Path) -> io::Result<()> {
 	Ok(())
 }
 
-async fn unzipWorker<'a, T: rc_zip_tokio::HasCursor>(
-	archive: &ArchiveHandle<'a, T>, destFolder: &Path,
-	foldersCreated: Arc<Mutex<HashSet<PathBuf>>>, workerCount: u32, i: u32,
+fn unzipWorker<'a, R: Read + io::Seek>(
+	archive: &mut ZipArchive<R>, password: Option<Vec<u8>>, destFolder: &Path,
+	foldersCreated: Arc<Mutex<HashSet<PathBuf>>>, workerCount: u32, wi: u32,
 ) -> io::Result<()> {
-	let mut tasks: Vec<JoinHandle<io::Result<()>>> = vec![];
 	let mut index: u32 = 0;
 	
-	for entry in archive.entries() {
-		match entry.kind() {
-			EntryKind::Directory => {
-				let path = destFolder.join(&entry.name);
-				{
-					let mut fld = foldersCreated.lock().await;
-					if fld.contains(&path) {
-						continue;
-					}
-					fld.insert(path.clone());
-				}
-				fs::create_dir_all(&path).await?;
-				// println!("{}", path.to_string_lossy());
-			}
-			EntryKind::File => {
-				index += 1;
-				if index % workerCount != i { continue; }
-				cleanupTasks(&mut tasks).await?;
-				
-				let path = destFolder.join(&entry.name);
-				if tasks.len() >= 5 || entry.uncompressed_size > 1024 * 1024 * 8 {
-					let mut data = entry.reader();
-					let mut file = fs::File::create(&path).await?;
-					
-					tokio::io::copy(&mut data, &mut file).await?;
-					// println!("Wrote BLOCKING {}", path.to_string_lossy());
-				} else {
-					let data = entry.bytes().await?;
-					let task = Work::spawn(async move {
-						let mut file = fs::File::create(&path).await?;
-						file.write_all(data.as_slice()).await?;
-						// println!("Wrote {}", path.to_string_lossy());
-						Ok(())
-					});
-					tasks.push(task);
-				}
-			}
-			EntryKind::Symlink => {
-				println!("UNKNOWN SYMLINK {}", entry.name);
-			}
+	for i in 0..archive.len() {
+		let mut entry: ZipFile =
+			if let Some(password) = &password {
+				archive.by_index_decrypt(i, password.as_slice())?.map_err(|e| std::io::Error::from(ErrorKind::Other))?
+			} else {
+				archive.by_index(i)?
+			};
+		let entryPath = entry.mangled_name();
+		
+		if entry.is_dir() {
+			let newPath = foldersCreated.access(|fld| {
+				fld.insert(entryPath.clone())
+			}).unwrap();
+			if !newPath { continue; }
+			std::fs::create_dir_all(&destFolder.join(&entryPath))?;
+			// println!("{}", path.to_string_lossy());
+			
+			continue;
 		}
+		
+		if !entry.is_file() { continue; }
+		
+		if workerCount > 1 {
+			index += 1;
+			if index % workerCount != wi { continue; }
+		}
+		
+		let path = destFolder.join(entryPath);
+		let mut file = std::fs::File::create(&path)?;
+		std::io::copy(&mut entry, &mut file)?;
+		// println!("Wrote {}", path.to_string_lossy());
 	}
 	
-	for task in tasks {
-		task.await??;
-	}
 	Ok(())
 }

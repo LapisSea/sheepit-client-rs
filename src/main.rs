@@ -39,7 +39,6 @@ use tokio::time::Instant;
 use crate::conf::{ComputeMethod, ClientConfig};
 use crate::ServerConf::ConfError;
 use rand::Rng;
-use rc_zip_tokio::{ArchiveHandle, HasCursor, rc_zip::{chrono::format, error::Error}};
 use regex::Regex;
 use reqwest::multipart::{Form, Part};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -52,9 +51,6 @@ use crate::net::{bodyText, fromXml, Req, RequestEndPoint, requireContentType, Tr
 use crate::process::{BlenderVersionStr, BlendProcessInfo, ProcStatus};
 use crate::serverCon::ServerConnection;
 use crate::utils::*;
-
-//H:\sheepit\sheepit\3616f03608a88c2c4186f9afd03722a4\rend.exe -t 3  --factory-startup --disable-autoexec -noaudio -b -P H:\sheepit\sheepit\pre_load_script_9866492119851812770.py H:\sheepit\sheepit\1\compute-method.blend -P H:\sheepit\sheepit\post_load_script_4425810924302583725.py --engine CYCLES -o H:\sheepit\sheepit\1_ -x 1 -f 0340
-//H:\test   \sheepit\3616f03608a88c2c4186f9afd03722a4\rend.exe -t 24 --factory-startup --disable-autoexec -noaudio -b -P H:\test   \sheepit\pre_load_script.py                     H:\test\sheepit\2\power-detection.blend -P H:\test\sheepit\post_load_script.py --engine CYCLES -o H:\test\sheepit\2_ -x 1 -f 0340
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -108,14 +104,6 @@ enum AppLoopAction {
 }
 
 fn main() -> ExitCode {
-	// let str="Fra:340 Mem:11.43M (Peak 13.74M) | Time:00:00.00 | Mem:1.01M, Peak:1.01M | Denoised_Scene, ViewLayer | Sample 0/1";
-	//
-	// let reg=Regex::new(r" (Rendered|Path Tracing Tile|Rendering|Sample) (\d+)\\s?/\s?(\d+)( Tiles| samples|,)*").unwrap();
-	// if let Some(captures) = reg.captures(str) {
-	// 	println!("{}\n{}",captures.get(1).unwrap().as_str(),captures.get(2).unwrap().as_str());
-	// }
-	//
-	// return ExitCode::SUCCESS;
 	let res = Work::block(start()).map_err(|e| format!("Aborting client because:\n{e}"));
 	match res {
 		Ok(_) => { ExitCode::SUCCESS }
@@ -505,8 +493,6 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 		}
 	});
 	
-	println!("{:#?}", command);
-	
 	let mut blenderProc = command.spawn().map_err(|e| RenderError::Unknown(e.to_string()))?;
 	let procInfo = Arc::new(Mutex::new(BlendProcessInfo::default()));
 	
@@ -667,7 +653,7 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 			if let Err(e) = files::deleteDirDeep(&extractLoc).await {
 				println!("Note: tried deleting {} but got: {e}", extractLoc.to_string_lossy())
 			}
-			files::unzip(zipLoc.as_path(), extractLoc.as_path()).await.map_err(|e| e.to_string())?;
+			files::unzip(zipLoc.as_path(), extractLoc.as_path(), None).await.map_err(|e| format!("Failed to unzip renderer because: {e}"))?;
 		}
 	}
 	
@@ -688,7 +674,8 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 				spwait!(tokio::io::copy(&mut ch, &mut mem), "Could not read",chunkPath)?;
 			}
 		}
-		swait!(files::unzipMem(mem, scenePath.as_path()), "Failed to unzip scene")?;
+		let password = job.info.password.as_deref();
+		files::unzipMem(mem, scenePath.as_path(), password).map_err(|e| format!("Failed to unzip scene because: {e}"))?;
 	}
 	Ok(())
 }

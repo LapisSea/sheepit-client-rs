@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use indoc::indoc;
 use lazy_static::lazy_static;
-use rc_zip_tokio::rc_zip::chrono::format::Numeric::Timestamp;
 use regex::Regex;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;

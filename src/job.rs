@@ -25,13 +25,13 @@ pub struct Chunk {
 	pub md5: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Chunks {
 	#[serde(alias = "chunk")]
 	pub chunks: Vec<Chunk>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RendererInfos {
 	#[serde(alias = "md5")]
 	pub md5: String,
@@ -41,7 +41,7 @@ pub struct RendererInfos {
 	pub updateMethod: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RenderTask {
 	#[serde(alias = "id")]
 	pub id: String,
@@ -135,7 +135,7 @@ pub struct JobInfo {
 	pub script: String,
 	pub archiveChunks: Vec<Chunk>,
 	pub name: String,
-	pub password: String,
+	pub password: Option<Vec<u8>>,
 	pub synchronousUpload: bool,
 	pub rendererInfo: RendererInfos,
 }
@@ -163,7 +163,7 @@ impl From<(RenderTask, &ServerConnection)> for Job {
 			script: t.script,
 			archiveChunks: t.chunks.chunks,
 			name: t.name,
-			password: t.password,
+			password: Some(t.password).filter(|p|! p.is_empty()).map(|p| p.as_bytes().to_owned()),
 			synchronousUpload: t.synchronousUpload == "1",
 			rendererInfo: t.rendererInfos,
 		};
