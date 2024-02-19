@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use md5::Digest;
 use tokio::io::AsyncReadExt;
+use crate::utils::ArcMut;
 
 #[derive(Eq, PartialEq)]
 struct HashNode {
@@ -15,7 +16,7 @@ struct HashNode {
 
 #[derive(Clone, Default)]
 pub struct HashCache {
-	data: Arc<Mutex<HashMap<Box<Path>, (HashNode, Digest)>>>,
+	data: ArcMut<HashMap<Box<Path>, (HashNode, Digest)>>,
 }
 
 

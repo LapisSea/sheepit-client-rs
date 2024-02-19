@@ -11,7 +11,7 @@ use tokio::io::{AsyncWriteExt, Join};
 use tokio::task::JoinHandle;
 use zip::read::ZipFile;
 use zip::ZipArchive;
-use crate::utils::{MutRes, Warn};
+use crate::utils::{ArcMut, MutRes, Warn};
 use crate::Work;
 
 pub async fn cleanWorkingDir(path: &Path) -> io::Result<()> {
@@ -121,7 +121,7 @@ pub async fn unzip(zipFile: &Path, destFolder: &Path, password: Option<&[u8]>) -
 	println!("Unzipping {}", &zipFile.to_string_lossy());
 	let mut tasks: Vec<JoinHandle<io::Result<()>>> = vec![];
 	let workerCount = 8;
-	let folders: Arc<Mutex<HashSet<PathBuf>>> = Default::default();
+	let folders: ArcMut<HashSet<PathBuf>> = Default::default();
 	for i in 0..workerCount {
 		let zipFile = zipFile.to_owned();
 		let destFolder = destFolder.to_owned();
@@ -143,7 +143,7 @@ pub async fn unzip(zipFile: &Path, destFolder: &Path, password: Option<&[u8]>) -
 
 fn unzipWorker<'a, R: Read + io::Seek>(
 	archive: &mut ZipArchive<R>, password: Option<Vec<u8>>, destFolder: &Path,
-	foldersCreated: Arc<Mutex<HashSet<PathBuf>>>, workerCount: u32, wi: u32,
+	foldersCreated: ArcMut<HashSet<PathBuf>>, workerCount: u32, wi: u32,
 ) -> io::Result<()> {
 	let mut index: u32 = 0;
 	

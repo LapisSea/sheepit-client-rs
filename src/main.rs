@@ -225,7 +225,7 @@ async fn stopAndBlockTasks(server: Arc<ServerConnection>, tasks: Vec<JoinHandle<
 	for x in tasks { let _ = x.await; }
 }
 
-async fn init(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, mut uploadReceiver: Receiver<FrameUploadMessage>) -> ResultMsg<Vec<JoinHandle<()>>> {
+async fn init(state: ArcMut<ClientState>, server: Arc<ServerConnection>, mut uploadReceiver: Receiver<FrameUploadMessage>) -> ResultMsg<Vec<JoinHandle<()>>> {
 	let keepAlive = {
 		let state = state.clone();
 		let server = server.clone();
@@ -352,7 +352,7 @@ async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 	}
 }
 
-async fn run(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>) -> AppLoopAction {
+async fn run(state: ArcMut<ClientState>, server: Arc<ServerConnection>) -> AppLoopAction {
 	let job = match server.requestJob(state.clone()).await {
 		Ok(job) => { job }
 		Err(err) => {
@@ -432,7 +432,7 @@ async fn preprocessJob(server: &ServerConnection, job: JobResponse) -> ResultMsg
 	Ok(job.renderTask.map(|t| JobResult::NewJob(Box::new((t, server).into()))).unwrap_or(JobResult::JustWaitFixed(1)))
 }
 
-async fn execute_job(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, job: Arc<Job>) -> ResultJMsg {
+async fn execute_job(state: ArcMut<ClientState>, server: Arc<ServerConnection>, job: Arc<Job>) -> ResultJMsg {
 	println!("Working on job \"{}\"", job.info.name);
 	downloadJobFiles(state, server.clone(), job.clone()).await?;
 	println!("Preparing work directory");
@@ -496,7 +496,7 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 	let mut blenderProc = command.spawn().map_err(|e| RenderError::Unknown(e.to_string()))?;
 	let procInfo = Arc::new(Mutex::new(BlendProcessInfo::default()));
 	
-	fn scanOutput<T: AsyncRead + Unpin + Send + Sync + 'static>(procInfo: Arc<Mutex<BlendProcessInfo>>, stream: T) -> JoinHandle<ResultJMsg> {
+	fn scanOutput<T: AsyncRead + Unpin + Send + Sync + 'static>(procInfo: ArcMut<BlendProcessInfo>, stream: T) -> JoinHandle<ResultJMsg> {
 		Work::spawn(async move {
 			let mut lines = BufReader::new(stream).lines();
 			loop {
@@ -680,7 +680,7 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 	Ok(())
 }
 
-async fn downloadJobFiles(state: Arc<Mutex<ClientState>>, server: Arc<ServerConnection>, job: Arc<Job>) -> ResultJMsg {
+async fn downloadJobFiles(state: ArcMut<ClientState>, server: Arc<ServerConnection>, job: Arc<Job>) -> ResultJMsg {
 	async fn downloadScene(server: Arc<ServerConnection>, job: Arc<Job>) -> ResultMsg<TransferStats> {
 		let mut jobs = vec![];
 		
@@ -724,7 +724,7 @@ async fn downloadJobFiles(state: Arc<Mutex<ClientState>>, server: Arc<ServerConn
 	Ok(())
 }
 
-async fn cleanup(state: Arc<Mutex<ClientState>>, server: &ServerConnection) {
+async fn cleanup(state: ArcMut<ClientState>, server: &ServerConnection) {
 	let cleanTask = {
 		let path = (*server.clientConf.workPath).to_owned();
 		Work::spawn(async move { files::cleanWorkingDir(path.as_path()).await })

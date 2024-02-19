@@ -89,6 +89,8 @@ impl<T, E: Display> Warn<T> for Result<T, E> {
 	}
 }
 
+pub type ArcMut<T> =Arc<Mutex<T>>;
+
 pub trait MutRes<T> {
 	fn access<R>(&self, get: impl FnOnce(&mut T) -> R) -> ResultMsg<R>;
 }

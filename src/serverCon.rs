@@ -9,7 +9,7 @@ use crate::conf::{ClientConfig, ComputeMethod};
 use crate::{ClientState, fmd5, FrameUploadMessage, HwInfo, net, RenderResult, ServerConfig};
 use crate::job::{Chunk, ClientErrorType, JobInfo, JobResponse};
 use crate::net::TransferStats;
-use crate::utils::{MutRes, ResultJMsg, ResultMsg};
+use crate::utils::{ArcMut, MutRes, ResultJMsg, ResultMsg};
 
 pub struct ServerConnection {
 	pub httpClient: Arc<Client>,
@@ -37,7 +37,7 @@ impl ServerConnection {
 		}
 	}
 	
-	pub async fn requestJob(&self, state: Arc<Mutex<ClientState>>) -> ResultMsg<JobResponse> {
+	pub async fn requestJob(&self, state: ArcMut<ClientState>) -> ResultMsg<JobResponse> {
 		println!("Requesting job");
 		
 		let cores = self.effectiveCores();
