@@ -14,6 +14,8 @@ mod utils;
 mod defs;
 mod process;
 mod serverCon;
+mod tui;
+mod global;
 
 use std::{env};
 use std::borrow::Cow;
@@ -28,7 +30,9 @@ use std::ptr::write;
 use std::rc::Rc;
 use std::sync::{Arc, LockResult, Mutex};
 use std::time::Duration;
+use crossterm::terminal::disable_raw_mode;
 use defer::defer;
+use futures_util::future::err;
 use futures_util::TryFutureExt;
 use indoc::indoc;
 use reqwest::{Client, RequestBuilder, Url};
@@ -104,14 +108,23 @@ enum AppLoopAction {
 }
 
 fn main() -> ExitCode {
-	let res = Work::block(start()).map_err(|e| format!("Aborting client because:\n{e}"));
-	match res {
-		Ok(_) => { ExitCode::SUCCESS }
-		Err(errMsg) => {
-			eprintln!("{errMsg}");
-			ExitCode::FAILURE
+	let e = tui::runUi();
+	match e {
+		Ok(O) => {}
+		Err(e) => {
+			println!("{e}");
 		}
 	}
+	ExitCode::SUCCESS
+	
+	// let res = Work::block(start()).map_err(|e| format!("Aborting client because:\n{e}"));
+	// match res {
+	// 	Ok(_) => { ExitCode::SUCCESS }
+	// 	Err(errMsg) => {
+	// 		eprintln!("{errMsg}");
+	// 		ExitCode::FAILURE
+	// 	}
+	// }
 }
 
 async fn start() -> ResultJMsg {
