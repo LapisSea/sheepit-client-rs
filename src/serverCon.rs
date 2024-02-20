@@ -3,6 +3,7 @@ use std::cmp::{max, min};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use anyhow::anyhow;
 use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use crate::conf::{ClientConfig, ComputeMethod};
@@ -138,7 +139,7 @@ impl ServerConnection {
 				file
 					.mime_str(match ext.deref() {
 						"txt" => { mime::TEXT_PLAIN }
-						_ => { return Err(format!("Could not find mime type of: {ext}")); }
+						_ => { return Err(anyhow!("Could not find mime type of: {ext}")); }
 					}.as_ref()).unwrap()
 					.file_name(path.to_string_lossy().to_string()),
 			);

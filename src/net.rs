@@ -5,6 +5,7 @@ use std::io;
 use std::ops::{Add, AddAssign};
 use std::path::{Path};
 use std::time::Duration;
+use anyhow::{anyhow, Context};
 use futures_util::StreamExt;
 use md5::Digest;
 use reqwest::{Client, IntoUrl, RequestBuilder, Response, Url};
@@ -79,7 +80,7 @@ impl RequestEndPoint {
 	pub async fn postRequestQueryParm<
 		S: AsRef<str> + Display,
 		ARGS: Serialize + ?Sized
-	>(&self, client: &Client, doamin: S, query: &ARGS) -> Result<Req, String> {
+	>(&self, client: &Client, doamin: S, query: &ARGS) -> ResultMsg<Req> {
 		self.post(client, doamin).query(query).send().await
 	}
 }
@@ -102,20 +103,20 @@ impl ReqBuild {
 		}
 	}
 	
-	pub async fn send(&self) -> Result<Req, String> {
+	pub async fn send(self) -> ResultMsg<Req> {
 		Ok(Req {
 			path: self.path.clone().into(),
-			res: send::<&str>(self.path.as_ref(), self.req.try_clone().unwrap()).await?,
+			res: send::<&str>(self.path.as_ref(), self.req).await?,
 		})
 	}
 }
 
 impl Req {
-	pub async fn text(self) -> Result<String, String> {
+	pub async fn text(self) -> ResultMsg<String> {
 		bodyText(self.path, self.res).await
 	}
 	
-	pub async fn xml<'de, T: de::Deserialize<'de>>(self) -> Result<T, String> {
+	pub async fn xml<'de, T: de::Deserialize<'de>>(self) -> ResultMsg<T> {
 		requireContentType(XML_CONTENT_O, &self.res)?;
 		let xml = bodyText(self.path, self.res).await?;
 		fromXml(xml.as_str())
@@ -123,30 +124,30 @@ impl Req {
 	
 	pub fn response(self) -> ResultMsg<Response> {
 		let res = self.res;
-		res.error_for_status_ref().map_err(|e| e.to_string())?;
+		res.error_for_status_ref()?;
 		Ok(res)
 	}
 }
 
 pub async fn send<U: Display>(url: U, res: RequestBuilder) -> ResultMsg<Response> {
 	res.send().await.and_then(|res| res.error_for_status())
-		.map_err(|e| format!("Could not get an ok response from {url} because: {e}"))
+		.map_err(|e| anyhow!("Could not get an ok response from {url} because: {e}"))
 }
 
-pub async fn bodyText<U: Display>(url: U, res: Response) -> Result<String, String> {
-	res.text().await.map_err(|e| format!("Failed to get body of {url} because: {e}"))
+pub async fn bodyText<U: Display>(url: U, res: Response) -> ResultMsg<String> {
+	res.text().await.map_err(|e| anyhow!("Failed to get body of {url} because: {e}"))
 }
 
 pub async fn postRequestForm<
 	T: Serialize + ?Sized,
 	U: IntoUrl + Display + Clone
->(client: &Client, url: U, data: &T, requiredContentType: Option<&str>) -> Result<String, String> {
+>(client: &Client, url: U, data: &T, requiredContentType: Option<&str>) -> ResultMsg<String> {
 	let resp = send(&url, client.post(url.clone()).form(data)).await?;
 	requireContentType(requiredContentType, &resp)?;
 	bodyText(url, resp).await
 }
 
-pub fn requireContentType(requiredContentType: Option<&str>, resp: &Response) -> Result<(), String> {
+pub fn requireContentType(requiredContentType: Option<&str>, resp: &Response) -> ResultMsg<()> {
 	let validContentType = match requiredContentType {
 		None => { true }//No required type. Anything goes
 		Some(requiredContentType) => {
@@ -161,7 +162,7 @@ pub fn requireContentType(requiredContentType: Option<&str>, resp: &Response) ->
 	};
 	
 	if !validContentType {
-		return Err(format!(
+		return Err(anyhow!(
 			"Could not get server config because the response is of invalid type.\n\tRequires {} But got {}",
 			requiredContentType.unwrap_or("none"),
 			match getContentTypeStr(resp) {
@@ -179,19 +180,19 @@ fn getContentTypeStr(resp: &Response) -> Option<&str> {
 		.and_then(|v| v.to_str().ok())
 }
 
-pub fn fromXml<'de, T: de::Deserialize<'de>>(xml: &str) -> Result<T, String> {
+pub fn fromXml<'de, T: de::Deserialize<'de>>(xml: &str) -> ResultMsg<T> {
 	let mut body = xml.trim();
 	if body.starts_with("<?xml") {
 		let mark = "?>";
 		body = &body[body.find(mark).unwrap_or(0) + mark.len()..].trim();
 	}
-	serde_xml_rs::from_str(body).map_err(|e| format!("Could not parse {} because: {}\nXML Text:\n{}", std::any::type_name::<T>(), e, xml))
+	serde_xml_rs::from_str(body).map_err(|e| anyhow!("Could not parse {} because: {}\nXML Text:\n{}", std::any::type_name::<T>(), e, xml))
 }
 
-pub fn toXml<T: serde::Serialize>(val: &T) -> Result<String, String> {
+pub fn toXml<T: serde::Serialize>(val: &T) -> ResultMsg<String> {
 	serde_xml_rs::to_string(val)
 		.map(|s| format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n{s}"))
-		.map_err(|e| format!("Could not serialize {} because: {}", std::any::type_name::<T>(), e))
+		.map_err(|e| anyhow!("Could not serialize {} because: {}", std::any::type_name::<T>(), e))
 }
 
 
@@ -227,12 +228,12 @@ impl AddAssign for TransferStats {
 	fn add_assign(&mut self, rhs: Self) { *self = (*self) + rhs; }
 }
 
-pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache: HashCache) -> Result<TransferStats, String> {
+pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache: HashCache) -> ResultMsg<TransferStats> {
 	let pathStr = path.to_string_lossy();
-	if tokio::fs::try_exists(path).await.map_err(|e| format!("Could not check existence of {} because: {}", pathStr, e))? {
+	if tokio::fs::try_exists(path).await.context(format!("Could not check existence of {pathStr}"))? {
 		println!("Checking validity of {pathStr}...");
 		let hash = computeFileHash(path, hashCache).await
-			.map_err(|e| format!("Could not read file \"{}\" because: {e}", pathStr));
+			.map_err(|e| anyhow!("Could not read file \"{}\" because: {e}", pathStr));
 		
 		match hash.and_then(|hash| checkMd5(md5Check, pathStr.as_ref(), hash)) {
 			Ok(_) => {
@@ -242,13 +243,13 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache:
 			Err(msg) => {
 				println!("{msg}. Re-downloading...");
 				tokio::fs::remove_file(path).await
-					.map_err(|e| format!("Could not delete file \"{}\" because: {e}", pathStr))?;
+					.map_err(|e| anyhow!("Could not delete file \"{}\" because: {e}", pathStr))?;
 			}
 		}
 	}
 	
 	if let Some(parent) = path.parent() {
-		tokio::fs::create_dir_all(parent).await.map_err(|e| format!("Could not create directory: {} because {e}", pathStr))?;
+		tokio::fs::create_dir_all(parent).await.context(format!("Could not create directory: {pathStr}"))?;
 	}
 	
 	let resp = req.send().await?.response()?;
@@ -256,19 +257,19 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache:
 	let mut stream = resp.bytes_stream();
 	
 	let mut file = tokio::fs::File::create(path).await
-		.map_err(|e| format!("Could not create file \"{}\" because: {e}", pathStr))?;
+		.context(format!("Could not create file \"{pathStr}\""))?;
 	
 	let mut bytesDownloaded = 0;
 	let start = Instant::now();
 	
 	let mut context = md5::Context::new();
 	while let Some(item) = StreamExt::next(&mut stream).await {
-		let item = item.map_err(|e| format!("Could not download \"{url}\" because: {e}"))?;
+		let item = item.context(format!("Could not download \"{url}\""))?;
 		// println!("chunk len {}", item.len());
 		bytesDownloaded += item.len() as u64;
 		let ch = item.as_ref();
 		context.consume(ch);
-		file.write_all(ch).await.map_err(|e| format!("Could not write to file: {}", pathStr))?;
+		file.write_all(ch).await.context(format!("Could not write to file: {}", pathStr))?;
 	}
 	
 	let end = Instant::now();
@@ -294,7 +295,7 @@ pub async fn tryConnectToServer(httpClient: &Client, conf: &mut ClientConfig, hw
 			}
 			Err(e) => {
 				if let ConfError::FatalStatus(code) = &e {
-					return Err(format!("Failed to establish connection to server due to fatal error: {code}"));
+					return Err(anyhow!("Failed to establish connection to server due to fatal error: {code}"));
 				}
 				let att = min(attempt, 9);
 				let time = att * att * 20;

@@ -30,6 +30,7 @@ use std::ptr::write;
 use std::rc::Rc;
 use std::sync::{Arc, LockResult, Mutex};
 use std::time::Duration;
+use anyhow::{anyhow, Context, Error};
 use crossterm::terminal::disable_raw_mode;
 use defer::defer;
 use futures_util::future::err;
@@ -50,6 +51,7 @@ use tokio::process::Child;
 use tokio::sync::{mpsc, mpsc::Receiver, MutexGuard, TryLockError};
 use tokio::task::JoinHandle;
 use crate::defs::XML_CONTENT_O;
+use crate::global::WorkerState;
 use crate::job::{Chunk, ClientErrorType, Job, JobInfo, JobRequestStatus, JobResponse};
 use crate::net::{bodyText, fromXml, Req, RequestEndPoint, requireContentType, TransferStats};
 use crate::process::{BlenderVersionStr, BlendProcessInfo, ProcStatus};
@@ -104,11 +106,12 @@ impl JobResult {
 enum AppLoopAction {
 	Continue,
 	CreateNewSession,
-	FatalStop(String),
+	FatalStop(Error),
 }
 
 fn main() -> ExitCode {
-	let e = tui::runUi();
+	let state = Arc::new(Mutex::new(WorkerState::new()));
+	let e = tui::runUi(state.clone().as_ref());
 	match e {
 		Ok(O) => {}
 		Err(e) => {
@@ -148,7 +151,7 @@ async fn start() -> ResultJMsg {
 				.map(|v| format!("/{}.{}.{}", v.major, v.minor, v.patch))
 				.unwrap_or_default()
 		))
-		.build().map_err(|e| format!("Failed to create http client: {e}"))?;
+		.build().map_err(|e| anyhow!("Failed to create http client: {e}"))?;
 	
 	
 	let hwInfo = awaitStrErr!(hwInfo)?;
@@ -188,7 +191,7 @@ async fn start() -> ResultJMsg {
 		};
 		
 		if let Some(cleanTask) = cleanTask {
-			awaitStrErr!(cleanTask).map_err(|e| format!("Failed to clean working dir because: {e}"))?;
+			awaitStrErr!(cleanTask).map_err(|e| anyhow!("Failed to clean working dir because: {e}"))?;
 		}
 		cleanTask = None;
 		
@@ -294,7 +297,7 @@ async fn init(state: ArcMut<ClientState>, server: Arc<ServerConnection>, mut upl
 
 async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 	async fn doUpload(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
-		let url = Url::parse(&frame.validationUrl).map_err(|e| e.to_string())?;
+		let url = Url::parse(&frame.validationUrl)?;
 		let queryParts = url.query_pairs();
 		
 		let mut builder = httpClient.post(url)
@@ -311,8 +314,8 @@ async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 		let path = frame.output.as_path();
 		let ext = path.extension().map(|s| s.to_string_lossy().to_string()).unwrap_or("png".to_string());
 		
-		let fileLen = fs::metadata(path).await.map_err(|e| "Could not open file {e}")?.len();
-		let file = fs::File::open(path).await.map_err(|e| "Could not open file {e}")?;
+		let fileLen = fs::metadata(path).await.map_err(|e| anyhow!( "Could not open file {e}"))?.len();
+		let file = fs::File::open(path).await.map_err(|e| anyhow!("Could not open file {e}"))?;
 		
 		builder = builder.multipart(Form::new()
 			.part(
@@ -333,7 +336,7 @@ async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 		}
 		let status = fromXml::<JobValidation>(xml.as_str())?.status;
 		if status != 0 {
-			return Err(format!("Got back validation code {status}"));//TODO handle codes properly
+			return Err(anyhow!("Got back validation code {status}"));//TODO handle codes properly
 		}
 		
 		Ok(())
@@ -423,15 +426,15 @@ async fn preprocessJob(server: &ServerConnection, job: JobResponse) -> ResultMsg
 			println!("There is no job right now. Sleeping for a bit...");
 			return Ok(JobResult::JustWaitFixed(2 * 60));
 		}
-		JobRequestStatus::ErrorNoRenderingRight => { return Err("Client has no right to render!".to_string()); }
+		JobRequestStatus::ErrorNoRenderingRight => { return Err(anyhow!("Client has no right to render!")); }
 		JobRequestStatus::ErrorDeadSession => { return Ok(JobResult::CreateNewSession); }
-		JobRequestStatus::ErrorSessionDisabled => { return Err("The session is disabled!".to_string()); }
-		JobRequestStatus::ErrorSessionDisabledDenoisingNotSupported => { return Err("Deonising is not supported!".to_string()); }
+		JobRequestStatus::ErrorSessionDisabled => { return Err(anyhow!("The session is disabled!")); }
+		JobRequestStatus::ErrorSessionDisabledDenoisingNotSupported => { return Err(anyhow!("Deonising is not supported!")); }
 		JobRequestStatus::ErrorInternalError => {
 			println!("The server had an error! Sleeping for a bit...");
 			return Ok(JobResult::JustWaitFixed(5 * 60));
 		}
-		JobRequestStatus::ErrorRendererNotAvailable => { return Err("The session is disabled!".to_string()); }
+		JobRequestStatus::ErrorRendererNotAvailable => { return Err(anyhow!("The session is disabled!")); }
 		JobRequestStatus::ServerInMaintenance => {
 			println!("The server is in maintenance! Sleeping for a bit...");
 			return Ok(JobResult::JustWait { min: 20 * 60, max: 30 * 60 });
@@ -462,7 +465,7 @@ async fn execute_job(state: ArcMut<ClientState>, server: Arc<ServerConnection>, 
 			if job.info.synchronousUpload {
 				uploadFrame(server.httpClient.as_ref(), &res).await?;
 			} else {
-				server.uploadSender.send(FrameUploadMessage::Frame(res)).await.map_err(|e| e.to_string())?;
+				server.uploadSender.send(FrameUploadMessage::Frame(res)).await?;
 			}
 		}
 		Err(err) => {
@@ -491,7 +494,7 @@ struct RenderResult {
 
 #[derive(Debug)]
 enum RenderError {
-	Unknown(String),
+	Unknown(Error),
 	NoOutputFile,
 	RendererCrashed,
 	RendererMissingLibraries,
@@ -506,7 +509,7 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 		}
 	});
 	
-	let mut blenderProc = command.spawn().map_err(|e| RenderError::Unknown(e.to_string()))?;
+	let mut blenderProc = command.spawn().map_err(|e| RenderError::Unknown(e.into()))?;
 	let procInfo = Arc::new(Mutex::new(BlendProcessInfo::default()));
 	
 	fn scanOutput<T: AsyncRead + Unpin + Send + Sync + 'static>(procInfo: ArcMut<BlendProcessInfo>, stream: T) -> JoinHandle<ResultJMsg> {
@@ -531,15 +534,15 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 	blenderProc.stdout
 		.take()
 		.map(|s| scanOutput(procInfo.clone(), s))
-		.ok_or(RenderError::Unknown("Failed to acquire stdout".to_string()))?;
+		.ok_or(RenderError::Unknown(anyhow!("Failed to acquire stdout")))?;
 	
 	blenderProc.stderr
 		.take()
 		.map(|s| scanOutput(procInfo.clone(), s))
-		.ok_or(RenderError::Unknown("Failed to acquire stderr".to_string()))?;
+		.ok_or(RenderError::Unknown(anyhow!("Failed to acquire stderr")))?;
 	
 	let memoryWatch: JoinHandle<ResultJMsg> = {
-		let pid = blenderProc.id().ok_or(RenderError::Unknown("Failed to get process PID".to_string()))?;
+		let pid = blenderProc.id().ok_or(RenderError::Unknown(anyhow!("Failed to get process PID")))?;
 		let procInfo = procInfo.clone();
 		Work::spawn(async move {
 			loop {
@@ -585,7 +588,7 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 			})?;
 			if shouldKill {
 				let mut blenderProc = blenderProc.lock().await;
-				blenderProc.kill().await.map_err(|e| format!("Failed to kill blender because: {e}"))
+				blenderProc.kill().await.map_err(|e| anyhow!("Failed to kill blender because: {e}"))
 			} else { Ok(()) }
 		})
 	};
@@ -606,7 +609,7 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 				break;
 			}
 			Ok(None) => {}//Alive
-			Err(e) => { return Err(RenderError::Unknown(format!("There was en error pooling blender process status: {e}"))); }
+			Err(e) => { return Err(RenderError::Unknown(anyhow!("There was en error pooling blender process status: {e}"))); }
 		}
 	}
 	
@@ -648,8 +651,8 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 	};
 	
 	Ok(RenderResult {
-		renderTime: procInfo.compositStart.ok_or(RenderError::Unknown("No composit start encountered".to_string()))?
-			.duration_since(procInfo.renderStart.ok_or(RenderError::Unknown("No render start encountered".to_string()))?),
+		renderTime: procInfo.compositStart.ok_or(RenderError::Unknown(anyhow!("No composit start encountered")))?
+			.duration_since(procInfo.renderStart.ok_or(RenderError::Unknown(anyhow!("No render start encountered")))?),
 		memoryUsed: procInfo.maxMemUsage,
 		output,
 		outputPreview,
@@ -666,7 +669,7 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 			if let Err(e) = files::deleteDirDeep(&extractLoc).await {
 				println!("Note: tried deleting {} but got: {e}", extractLoc.to_string_lossy())
 			}
-			files::unzip(zipLoc.as_path(), extractLoc.as_path(), None).await.map_err(|e| format!("Failed to unzip renderer because: {e}"))?;
+			files::unzip(zipLoc.as_path(), extractLoc.as_path(), None).await.context("Failed to unzip renderer ")?;
 		}
 	}
 	
@@ -675,7 +678,7 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 		
 		let mut size = 0;
 		for path in job.info.archiveChunks.iter().map(|c| server.clientConf.chunkPath(c)) {
-			size += fs::metadata(path).await.map_err(|e| e.to_string())?.len();
+			size += fs::metadata(path).await?.len();
 		}
 		
 		let mut mem = vec![];
@@ -688,7 +691,7 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 			}
 		}
 		let password = job.info.password.as_deref();
-		files::unzipMem(mem, scenePath.as_path(), password).map_err(|e| format!("Failed to unzip scene because: {e}"))?;
+		files::unzipMem(mem, scenePath.as_path(), password).context("Failed to unzip scene")?;
 	}
 	Ok(())
 }

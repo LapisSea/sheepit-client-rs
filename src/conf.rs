@@ -2,6 +2,7 @@ use std::fmt::{Display, format, Formatter, Pointer, write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use anyhow::anyhow;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use crate::defs::BASE_URL;
@@ -81,9 +82,9 @@ pub struct ConfigBuild {
 
 impl ConfigBuild {
 	pub fn make(self) -> ResultMsg<ClientConfig> {
-		fn req<T>(val: Option<T>, err: &str) -> Result<T, String> {
+		fn req<T>(val: Option<T>, err: &str) -> ResultMsg<T> {
 			match val {
-				None => Err(err.into()),
+				None => Err(anyhow!(err.to_string())),
 				Some(value) => Ok(value),
 			}
 		}
@@ -92,9 +93,9 @@ impl ConfigBuild {
 			password: req(self.password, "The -password <password> is required")?,
 			hostname: self.hostname.unwrap_or(BASE_URL.into()),
 			workPath: req(self.workPath, "The -cache-dir <folder path> is required")?
-				.canonicalize().map_err(|e| format!("Failed to turn path to absolute{e}"))?.into(),
+				.canonicalize().map_err(|e| anyhow!("Failed to turn path to absolute{e}"))?.into(),
 			binCachePath: req(self.binCachePath, "The -cache-dir <folder path> is required")?
-				.canonicalize().map_err(|e| format!("Failed to turn path to absolute{e}"))?.into(),
+				.canonicalize().map_err(|e| anyhow!("Failed to turn path to absolute{e}"))?.into(),
 			headless: self.headless.unwrap_or(false),
 			computeMethod: self.computeMethod.unwrap_or(ComputeMethod::Cpu),
 			maxCpuCores: self.maxCpuCores,
@@ -105,13 +106,13 @@ impl ConfigBuild {
 }
 
 
-pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> Result<ConfigBuild, String> {
-	fn requireNextO(args: &mut dyn Iterator<Item=Box<str>>) -> Result<Option<Box<str>>, String> {
+pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> ResultMsg<ConfigBuild> {
+	fn requireNextO(args: &mut dyn Iterator<Item=Box<str>>) -> ResultMsg<Option<Box<str>>> {
 		requireNext(args).map(Some)
 	}
-	fn requireNext(args: &mut dyn Iterator<Item=Box<str>>) -> Result<Box<str>, String> {
+	fn requireNext(args: &mut dyn Iterator<Item=Box<str>>) -> ResultMsg<Box<str>> {
 		match args.next() {
-			None => Err("Not enough arguments".into()),
+			None => Err(anyhow!("Not enough arguments")),
 			Some(value) => Ok(value.deref().into()),
 		}
 	}
@@ -138,7 +139,7 @@ pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> Result<ConfigBuild
 				res.headless = Some(match str.as_str() {
 					"true" => { true }
 					"false" => { false }
-					_ => { return Err("-headless can be only true or false".into()); }
+					_ => { return Err(anyhow!("-headless can be only true or false")); }
 				});
 			}
 			"-hostname" => {
@@ -146,7 +147,7 @@ pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> Result<ConfigBuild
 				let url = match Url::parse(str.as_ref()) {
 					Ok(u) => { u }
 					Err(err) => {
-						return Err(format!("Malformed -hostname: \"{err}\""));
+						return Err(anyhow!("Malformed -hostname: \"{err}\""));
 					}
 				};
 				res.hostname = Some(url.to_string().into());
@@ -157,35 +158,35 @@ pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> Result<ConfigBuild
 					"cpu" => { ComputeMethod::Cpu }
 					"gpu" => { ComputeMethod::Gpu }
 					"cpu_gpu" | "cpugpu" => { ComputeMethod::CpuGpu }
-					_ => { return Err(format!("Unknown compute method: \"{str}\", can only be CPU, GPU, CPU_GPU")); }
+					_ => { return Err(anyhow!("Unknown compute method: \"{str}\", can only be CPU, GPU, CPU_GPU")); }
 				});
 			}
 			"-cores" => {
 				let str = requireNext(args)?;
-				let cores = str.parse().map_err(|e| format!("-cores must be a positive number but is: \"{str}\""))?;
-				if cores == 0 { return Err("-cores must be greater than 0".to_string()); }
+				let cores = str.parse().map_err(|e| anyhow!("-cores must be a positive number but is: \"{str}\""))?;
+				if cores == 0 { return Err(anyhow!("-cores must be greater than 0")); }
 				res.maxCpuCores = Some(cores);
 			}
 			"-memory" => {
 				let str = requireNext(args)?;
-				let mem = str.parse().map_err(|e| format!("-memory must be a positive number but is: \"{str}\""))?;
-				if mem == 0 { return Err("-memory must be greater than 0".to_string()); }
+				let mem = str.parse().map_err(|e| anyhow!("-memory must be a positive number but is: \"{str}\""))?;
+				if mem == 0 { return Err(anyhow!("-memory must be greater than 0")); }
 				res.maxMemory = Some(mem);
 			}
 			"-max-render-time" => {
 				let str = requireNext(args)?;
-				let time = str.parse::<u64>().map_err(|e| format!("-max-render-time <time> must be a positive number but is: \"{str}\""))?;
+				let time = str.parse::<u64>().map_err(|e| anyhow!("-max-render-time <time> must be a positive number but is: \"{str}\""))?;
 				let str = requireNext(args)?;
 				let unitMul = match str.as_ref() {
 					"s" | "sec" => { 1 }
 					"m" | "min" => { 60 }
 					"h" | "hours" => { 60 * 60 }
-					_ => { return Err(format!("-max-render-time <time> <time-unit> must be one of [s, sec, m, min, h, hours] but is {str}")); }
+					_ => { return Err(anyhow!("-max-render-time <time> <time-unit> must be one of [s, sec, m, min, h, hours] but is {str}")); }
 				};
 				
 				res.maxRenderTime = Some(Duration::from_secs(time * unitMul))
 			}
-			_ => { return Err(format!("Unrecognised option: \"{part}\"")); }
+			_ => { return Err(anyhow!("Unrecognised option: \"{part}\"")); }
 		}
 	}
 	

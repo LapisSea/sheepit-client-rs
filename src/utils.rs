@@ -6,11 +6,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use anyhow::anyhow;
 use tokio::task::JoinHandle;
 use crate::Work;
 use crate::Work::TOKIO_RT;
 
-pub type ResultMsg<T> = Result<T, String>;
+pub type ResultMsg<T> = anyhow::Result<T>;
 pub type ResultJMsg = ResultMsg<()>;
 
 #[macro_export]
@@ -56,21 +57,21 @@ macro_rules! tSleepRandRange {
 #[macro_export]
 macro_rules! awaitStrErr {
     ($future:expr) => {
-	    $future.await.map_err(|e|"Failed to execute".to_string())?
+	    $future.await.map_err(|e|anyhow!("Failed to execute"))?
     };
 }
 
 #[macro_export]
 macro_rules! swait {
     ($future:expr,$msg:expr) => {
-	 	$future.await.map_err(|e| format!("{} because: {e}",$msg))
+	 	$future.await.map_err(|e| anyhow!("{} because: {e}",$msg))
     };
 }
 
 #[macro_export]
 macro_rules! spwait {
     ($future:expr,$msg:expr,$path:expr) => {
-	 	$future.await.map_err(|e| format!("{} {} because: {}",$msg, &$path.to_string_lossy(),e))
+	 	$future.await.map_err(|e| anyhow!("{} {} because: {}",$msg, &$path.to_string_lossy(),e))
     };
 }
 pub trait Warn<T> {
@@ -100,7 +101,7 @@ impl<T> MutRes<T> for Mutex<T> {
 		match self.lock() {
 			Ok(mut v) => { Ok(get(v.deref_mut())) }
 			Err(err) => {
-				Err(format!("Something has gone very wrong... {err}"))
+				Err(anyhow!("Something has gone very wrong... {err}"))
 			}
 		}
 	}

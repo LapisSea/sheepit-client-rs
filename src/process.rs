@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
+use anyhow::anyhow;
 use indoc::indoc;
 use lazy_static::lazy_static;
 use regex::Regex;

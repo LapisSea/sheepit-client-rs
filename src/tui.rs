@@ -3,8 +3,10 @@ use std::{
 	time::Duration,
 };
 use std::cmp::{max, min};
+use std::ops::Deref;
+use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use crossterm::{
 	event::{self, Event, KeyCode},
 	execute,
@@ -21,6 +23,7 @@ use serde::de::Unexpected::Option;
 use tokio::time::Instant;
 use crate::global;
 use crate::global::{QuitState, WorkerState};
+use crate::utils::{ArcMut, MutRes, ResultJMsg, ResultMsg};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -41,9 +44,9 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
 	terminal.show_cursor().context("unable to show cursor")
 }
 
-pub fn runUi() -> Result<()> {
+pub fn runUi(state: &Mutex<WorkerState>) -> Result<()> {
 	let mut terminal = setup_terminal().context("setup failed")?;
-	let res = run(&mut terminal).context("app loop failed");
+	let res = run(&mut terminal, state).context("app loop failed");
 	restore_terminal(&mut terminal).context("restore terminal failed")?;
 	res
 }
@@ -55,12 +58,8 @@ struct UIState {
 	lastCheck: Instant,
 }
 
-fn run(terminal: &mut Term) -> Result<()> {
+fn run(terminal: &mut Term, state: &Mutex<WorkerState>) -> ResultJMsg {
 	let uiState = &mut UIState { spinId: 0, task_scroll: 0, log_scroll: 0, lastCheck: Instant::now() };
-	let state = &mut WorkerState::new();
-	state.tasks.push(global::Task { name: format!("Task {}", state.tasks.len() + 1), progress: 0.2 });
-	state.tasks.push(global::Task { name: format!("Task {}", state.tasks.len() + 1), progress: 0.5 });
-	state.tasks.push(global::Task { name: format!("Task {}", state.tasks.len() + 1), progress: 0.8 });
 	
 	let mut lastState = None;
 	let mut lastRefresh = Instant::now();
@@ -69,14 +68,22 @@ fn run(terminal: &mut Term) -> Result<()> {
 		match cmd {
 			UILoop::Sleep => {}
 			UILoop::Normal | UILoop::Force => {
-				if matches!(cmd, UILoop::Force) ||
-					lastState.as_ref().map(|l| state != l).unwrap_or(true) ||
+				let (shouldQuit, stateChange) = lastState.as_ref().map(|l| {
+					state.access(|s| (matches!(s.quitState, QuitState::Quit), s != l))
+				}).unwrap_or(Ok((false, true)))?;
+				if shouldQuit {
+					return Ok(());
+				}
+				if stateChange ||
+					matches!(cmd, UILoop::Force) ||
 					lastRefresh.elapsed() > Duration::from_secs(2)
 				{
-					lastState = Some(state.clone());
+					if stateChange { lastState = Some(state.access(|s| s.clone())?); }
 					lastRefresh = Instant::now();
 					terminal.draw(|f| {
-						render_app(f, state, uiState);
+						if let Err(e) = render_app(f, state, uiState) {
+							f.render_widget(Text::from(e.to_string()).fg(Color::Red), f.size());
+						}
 					})?;
 				}
 				uiState.lastCheck = Instant::now();
@@ -88,7 +95,8 @@ fn run(terminal: &mut Term) -> Result<()> {
 	}
 }
 
-fn render_app(frame: &mut Frame, state: &mut WorkerState, uiState: &mut UIState) {
+fn render_app(frame: &mut Frame, state: &Mutex<WorkerState>, uiState: &mut UIState) -> ResultJMsg {
+	let state = state.lock().map_err(|e| anyhow!("State corrupted: {e}"))?;
 	let scrollEnd = uiState.task_scroll + MAX_TASKS - 1;
 	let off = state.tasks.len() as i32 - scrollEnd as i32;
 	if off < 0 {
@@ -99,6 +107,7 @@ fn render_app(frame: &mut Frame, state: &mut WorkerState, uiState: &mut UIState)
 		QuitState::Running => { "Running" }
 		QuitState::Quitting => { "Quitting after job. (quit again to cancel job)" }
 		QuitState::QuittingNow => { "Quitting now..." }
+		QuitState::Quit => { "Closing..." }
 	};
 	
 	let spin = r"|/-\";
@@ -175,6 +184,7 @@ fn render_app(frame: &mut Frame, state: &mut WorkerState, uiState: &mut UIState)
 	let scroll = count.saturating_sub((uiState.log_scroll + area.height) as usize);
 	let paragraph = Paragraph::new(lines).scroll((scroll as u16, 0));
 	render_widgetScroll(frame, paragraph, area, count, scroll);
+	Ok(())
 }
 
 fn ceiling_divide(dividend: usize, divisor: usize) -> usize {
@@ -206,7 +216,7 @@ enum UILoop {
 	Sleep,
 }
 
-fn poolInputs(state: &mut WorkerState, uiState: &mut UIState) -> Result<UILoop> {
+fn poolInputs(state: &Mutex<WorkerState>, uiState: &mut UIState) -> Result<UILoop> {
 	if !event::poll(Duration::from_millis(5)).context("event poll failed")? {
 		if uiState.lastCheck.elapsed() > Duration::from_millis(100) {
 			return Ok(UILoop::Normal);
@@ -226,40 +236,27 @@ fn poolInputs(state: &mut WorkerState, uiState: &mut UIState) -> Result<UILoop> 
 				match key.code {
 					KeyCode::Char(QUIT_KEY) => {
 						if key.modifiers == KeyModifiers::CONTROL {
-							match state.quitState {
-								QuitState::Running => {
-									state.quitState = QuitState::Quitting;
-									return Ok(UILoop::Quit);
+							state.access(|state| {
+								match state.quitState {
+									QuitState::Running => {
+										state.quitState = QuitState::Quitting;
+									}
+									QuitState::Quitting => {
+										state.quitState = QuitState::QuittingNow;
+									}
+									QuitState::QuittingNow | QuitState::Quit => {}
 								}
-								QuitState::Quitting => {
-									state.quitState = QuitState::QuittingNow;
-								}
-								QuitState::QuittingNow => {
-									return Ok(UILoop::Quit);
-								}
-							}
+							})?;
 						}
 					}
 					KeyCode::Char('1') => {
 						if uiState.task_scroll > 0 {
 							uiState.task_scroll -= 1;
-							state.log += "scrolled up\n";
 							return Ok(UILoop::Force);
 						}
 					}
 					KeyCode::Char('2') => {
 						uiState.task_scroll += 1;
-						state.log += "scrolled down\n";
-						return Ok(UILoop::Force);
-					}
-					KeyCode::Char('3') => {
-						state.tasks.push(global::Task { name: format!("Task {}", state.tasks.len() + 1), progress: rand::thread_rng().next_u32() as f32 / (u32::MAX) as f32 });
-						state.log += "added task\n";
-						return Ok(UILoop::Force);
-					}
-					KeyCode::Char('4') => {
-						state.tasks.pop();
-						state.log += "removed task\n";
 						return Ok(UILoop::Force);
 					}
 					_ => {}

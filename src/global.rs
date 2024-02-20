@@ -3,6 +3,7 @@ pub enum QuitState {
 	Running,
 	Quitting,
 	QuittingNow,
+	Quit,
 }
 
 #[derive(Debug, Clone)]

@@ -4,9 +4,10 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use anyhow::anyhow;
 use md5::Digest;
 use tokio::io::AsyncReadExt;
-use crate::utils::ArcMut;
+use crate::utils::{ArcMut, ResultJMsg};
 
 #[derive(Eq, PartialEq)]
 struct HashNode {
@@ -53,9 +54,9 @@ pub async fn computeFileHash(path: &Path, cache: HashCache) -> io::Result<Digest
 	Ok(hash)
 }
 
-pub fn checkMd5<T: Display>(md5Check: &str, owner: T, computed: Digest) -> Result<(), String> {
+pub fn checkMd5<T: Display>(md5Check: &str, owner: T, computed: Digest) -> ResultJMsg {
 	let md5s = format!("{:x}", computed);
 	if md5s.as_str().eq(md5Check) { return Ok(()); }
 	// println!("{md5s}\n{md5Check}");
-	Err(format!("Hashes do not match for {}", owner))
+	Err(anyhow!("Hashes do not match for {}", owner))
 }
