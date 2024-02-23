@@ -9,6 +9,7 @@ use crate::defs::BASE_URL;
 use crate::job::{Chunk, Job, JobInfo};
 use crate::utils;
 use crate::utils::ResultMsg;
+use crate::utils::{absolute_path, ResultMsg};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub enum ComputeMethod {
@@ -92,10 +93,10 @@ impl ConfigBuild {
 			login: req(self.login, "The -login <username> is required")?,
 			password: req(self.password, "The -password <password> is required")?,
 			hostname: self.hostname.unwrap_or(BASE_URL.into()),
-			workPath: req(self.workPath, "The -cache-dir <folder path> is required")?
-				.canonicalize().map_err(|e| anyhow!("Failed to turn path to absolute{e}"))?.into(),
-			binCachePath: req(self.binCachePath, "The -cache-dir <folder path> is required")?
-				.canonicalize().map_err(|e| anyhow!("Failed to turn path to absolute{e}"))?.into(),
+			workPath: absolute_path(req(self.workPath, "The -cache-dir <folder path> is required")?)
+				.context("Failed to turn path of workPath to absolute")?.into(),
+			binCachePath: absolute_path(req(self.binCachePath, "The -cache-dir <folder path> is required")?)
+				.context("Failed to turn path of binCachePath to absolute")?.into(),
 			headless: self.headless.unwrap_or(false),
 			computeMethod: self.computeMethod.unwrap_or(ComputeMethod::Cpu),
 			maxCpuCores: self.maxCpuCores,

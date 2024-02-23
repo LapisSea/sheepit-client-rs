@@ -132,3 +132,12 @@ macro_rules! deferAsync {
 		});
 	};
 }
+
+pub fn absolute_path(path: impl AsRef<Path>) -> ResultMsg<PathBuf> {
+	let path = path.as_ref();
+	Ok(if path.is_absolute() {
+		path.to_path_buf()
+	} else {
+		env::current_dir()?.join(path)
+	})
+}
