@@ -159,11 +159,11 @@ pub async fn fetchNew(httpClient: &Client, conf: &ClientConfig, hwInfo: &HwInfo:
 		("hwid", hwInfo.hwId.clone().into()),
 	];
 	let url = format!("{}{}", conf.hostname, SERVER_CONF_ENDPOINT);
-	// println!("{:#?}", args);
+	// log!("{:#?}", args);
 	
 	let xml = postRequestForm(httpClient, url, args, XML_CONTENT_O).await
 		.map_err(|e| ConfError::IOError(e.to_string()))?;
-	// println!("Got back:\n{xml}");
+	// log!("Got back:\n{xml}");
 	
 	let conf: ServerConfigBuild = fromXml(xml.as_str())
 		.map_err(|e| ConfError::IOError(format!("Server configuration is malformed:\n\t{}", e)))?;

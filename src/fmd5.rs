@@ -57,6 +57,6 @@ pub async fn computeFileHash(path: &Path, cache: HashCache) -> io::Result<Digest
 pub fn checkMd5<T: Display>(md5Check: &str, owner: T, computed: Digest) -> ResultJMsg {
 	let md5s = format!("{:x}", computed);
 	if md5s.as_str().eq(md5Check) { return Ok(()); }
-	// println!("{md5s}\n{md5Check}");
+	// log!("{md5s}\n{md5Check}");
 	Err(anyhow!("Hashes do not match for {}", owner))
 }

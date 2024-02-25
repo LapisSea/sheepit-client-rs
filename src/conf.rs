@@ -2,13 +2,12 @@ use std::fmt::{Display, format, Formatter, Pointer, write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use crate::defs::BASE_URL;
 use crate::job::{Chunk, Job, JobInfo};
-use crate::utils;
-use crate::utils::ResultMsg;
+use crate::{log, utils};
 use crate::utils::{absolute_path, ResultMsg};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]

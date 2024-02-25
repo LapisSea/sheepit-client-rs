@@ -17,7 +17,7 @@ mod serverCon;
 mod tui;
 mod global;
 
-use std::{env};
+use std::{env, thread};
 use std::borrow::Cow;
 use std::cmp::{max, min};
 use std::fmt::{Display, format};
@@ -51,7 +51,7 @@ use tokio::process::Child;
 use tokio::sync::{mpsc, mpsc::Receiver, MutexGuard, TryLockError};
 use tokio::task::JoinHandle;
 use crate::defs::XML_CONTENT_O;
-use crate::global::WorkerState;
+use crate::global::{QuitState, state, WorkerState};
 use crate::job::{Chunk, ClientErrorType, Job, JobInfo, JobRequestStatus, JobResponse};
 use crate::net::{bodyText, fromXml, Req, RequestEndPoint, requireContentType, TransferStats};
 use crate::process::{BlenderVersionStr, BlendProcessInfo, ProcStatus};
@@ -110,28 +110,34 @@ enum AppLoopAction {
 }
 
 fn main() -> ExitCode {
-	let state = Arc::new(Mutex::new(WorkerState::new()));
-	let e = tui::runUi(state.clone().as_ref());
-	match e {
-		Ok(O) => {}
-		Err(e) => {
-			println!("{e}");
+	// let uiRes = {
+	// 	thread::Builder::new().name("UI thread".into()).spawn(move || {
+	// 		tui::runUi(global::state())
+	// 	}).unwrap()
+	// };
+	
+	let res = Work::block(async {
+		let res = start().await;
+		if let Err(err) = res.as_ref() {
+			log!("Aborting client because:\n{}", err);
+		}
+		tSleep!(2);
+		let _ = state().access(|s| s.quitState = QuitState::Quit);
+		res
+	}).map_err(|e| format!("Aborting client because:\n{e}"));
+	
+	// let uiRes = uiRes.join().map_err(|e| anyhow!("Failed to run")).and_then(|e| e);
+	match res {
+		Ok(_) => { ExitCode::SUCCESS }
+		Err(errMsg) => {
+			// println!("{errMsg}");
+			ExitCode::FAILURE
 		}
 	}
-	ExitCode::SUCCESS
-	
-	// let res = Work::block(start()).map_err(|e| format!("Aborting client because:\n{e}"));
-	// match res {
-	// 	Ok(_) => { ExitCode::SUCCESS }
-	// 	Err(errMsg) => {
-	// 		eprintln!("{errMsg}");
-	// 		ExitCode::FAILURE
-	// 	}
-	// }
 }
 
 async fn start() -> ResultJMsg {
-	println!("###Start");
+	log!("###Start");
 	let hwInfo = Work::spawn(HwInfo::collectInfo());
 	let mut clientConf = conf::read(&mut env::args().skip(1).map(|x| x.into()))?.make()?;
 	
@@ -156,8 +162,8 @@ async fn start() -> ResultJMsg {
 	
 	let hwInfo = awaitStrErr!(hwInfo)?;
 	
-	println!("{:#?}", hwInfo);
-	println!("{:#?}", clientConf);
+	log!("{:#?}", hwInfo);
+	log!("{:#?}", clientConf);
 	
 	let httpClient = Arc::new(httpClient);
 	
@@ -184,7 +190,7 @@ async fn start() -> ResultJMsg {
 		let tasks = match init(state.clone(), server.clone(), uploadReceiver).await {
 			Ok(t) => { t }
 			Err(err) => {
-				println!("Failed to init: {err}");
+				log!("Failed to init: {err}");
 				state.stop()?;
 				vec![]
 			}
@@ -225,7 +231,7 @@ async fn start() -> ResultJMsg {
 				}
 				AppLoopAction::FatalStop(fatal) => {
 					state.stop()?;
-					println!("A fatal error has occurred. Shutting down because:\n\t{fatal}");
+					log!("A fatal error has occurred. Shutting down because:\n\t{fatal}");
 				}
 			}
 		}
@@ -272,7 +278,7 @@ async fn init(state: ArcMut<ClientState>, server: Arc<ServerConnection>, mut upl
 					tSleep!(60);
 				}
 			}
-			println!("Ended keepalive worker");
+			log!("Ended keepalive worker");
 		})
 	};
 	
@@ -288,7 +294,7 @@ async fn init(state: ArcMut<ClientState>, server: Arc<ServerConnection>, mut upl
 					}
 				}
 			}
-			println!("Ended uploader worker");
+			log!("Ended uploader worker");
 		})
 	};
 	
@@ -326,7 +332,7 @@ async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 			));
 		
 		let response = net::send(&frame.validationUrl, builder).await?;
-		// println!("{:#?}", response);
+		// log!("{:#?}", response);
 		
 		requireContentType(defs::XML_CONTENT_O, &response)?;
 		let xml = bodyText(&frame.validationUrl, response).await?;
@@ -348,7 +354,7 @@ async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 		}
 	});
 	
-	println!("Uploading {:#?}", frame);
+	log!("Uploading {:#?}", frame);
 	
 	let mut attempt = 1;
 	let mut timeToSleep = 22;
@@ -358,10 +364,10 @@ async fn uploadFrame(httpClient: &Client, frame: &RenderResult) -> ResultJMsg {
 			if attempt == 3 {
 				return Err(msg);
 			}
-			println!("{msg} (attempt {attempt})");
+			log!("{msg} (attempt {attempt})");
 		} else { return Ok(()); }
 		
-		println!("Failed to upload frame. trying in {timeToSleep} seconds");
+		log!("Failed to upload frame. trying in {timeToSleep} seconds");
 		tSleep!(timeToSleep);
 		attempt += 1;
 		timeToSleep *= 2;
@@ -372,7 +378,7 @@ async fn run(state: ArcMut<ClientState>, server: Arc<ServerConnection>) -> AppLo
 	let job = match server.requestJob(state.clone()).await {
 		Ok(job) => { job }
 		Err(err) => {
-			println!("Failed to request job! Reason:\n\t{}", err);
+			log!("Failed to request job! Reason:\n\t{}", err);
 			tSleepMinRandRange!(15..=30);
 			return AppLoopAction::Continue;
 		}
@@ -413,17 +419,17 @@ async fn preprocessJob(server: &ServerConnection, job: JobResponse) -> ResultMsg
 			]) {
 			if let Err(err) = fs::remove_file(&path).await {
 				let s = path.as_os_str();
-				println!("Failed to delete {} because: {err}", s.to_string_lossy().deref());
+				log!("Failed to delete {} because: {err}", s.to_string_lossy().deref());
 			}
 		}
 	}
 	if let Some(stat) = &job.sessionStats {
-		println!("User status: {:#?}", stat);
+		log!("User status: {:#?}", stat);
 	}
 	match &job.status() {
 		JobRequestStatus::Ok | JobRequestStatus::Unknown => {}
 		JobRequestStatus::Nojob => {
-			println!("There is no job right now. Sleeping for a bit...");
+			log!("There is no job right now. Sleeping for a bit...");
 			return Ok(JobResult::JustWaitFixed(2 * 60));
 		}
 		JobRequestStatus::ErrorNoRenderingRight => { return Err(anyhow!("Client has no right to render!")); }
@@ -431,16 +437,16 @@ async fn preprocessJob(server: &ServerConnection, job: JobResponse) -> ResultMsg
 		JobRequestStatus::ErrorSessionDisabled => { return Err(anyhow!("The session is disabled!")); }
 		JobRequestStatus::ErrorSessionDisabledDenoisingNotSupported => { return Err(anyhow!("Deonising is not supported!")); }
 		JobRequestStatus::ErrorInternalError => {
-			println!("The server had an error! Sleeping for a bit...");
+			log!("The server had an error! Sleeping for a bit...");
 			return Ok(JobResult::JustWaitFixed(5 * 60));
 		}
 		JobRequestStatus::ErrorRendererNotAvailable => { return Err(anyhow!("The session is disabled!")); }
 		JobRequestStatus::ServerInMaintenance => {
-			println!("The server is in maintenance! Sleeping for a bit...");
+			log!("The server is in maintenance! Sleeping for a bit...");
 			return Ok(JobResult::JustWait { min: 20 * 60, max: 30 * 60 });
 		}
 		JobRequestStatus::ServerOverloaded => {
-			println!("The server is overloaded! Sleeping for a bit...");
+			log!("The server is overloaded! Sleeping for a bit...");
 			return Ok(JobResult::JustWait { min: 10 * 60, max: 30 * 60 });
 		}
 	}
@@ -449,9 +455,9 @@ async fn preprocessJob(server: &ServerConnection, job: JobResponse) -> ResultMsg
 }
 
 async fn execute_job(state: ArcMut<ClientState>, server: Arc<ServerConnection>, job: Arc<Job>) -> ResultJMsg {
-	println!("Working on job \"{}\"", job.info.name);
+	log!("Working on job \"{}\"", job.info.name);
 	downloadJobFiles(state, server.clone(), job.clone()).await?;
-	println!("Preparing work directory");
+	log!("Preparing work directory");
 	prepareWorkingDirectory(server.clone(), job.clone()).await?;
 	let serverC = server.clone();
 	let jobc = job.clone();
@@ -469,7 +475,7 @@ async fn execute_job(state: ArcMut<ClientState>, server: Arc<ServerConnection>, 
 			}
 		}
 		Err(err) => {
-			println!("{:?}", err);
+			log!("{:?}", err);
 		}
 	}
 	
@@ -620,7 +626,7 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 	
 	maxRenderTimeTrigger.abort();
 	
-	println!("{:#?}", procInfo);
+	log!("{:#?}", procInfo);
 	
 	let mut outputFiles = vec![];
 	let nameStart = format!("{}_{}.", job.info.id, job.info.frameNumber);
@@ -667,7 +673,7 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 		let extractLoc = server.clientConf.rendererPath(&job.info);
 		if !swait!(tokio::fs::try_exists(extractLoc.join("rend.exe")), "").is_ok_and(|r| r) {
 			if let Err(e) = files::deleteDirDeep(&extractLoc).await {
-				println!("Note: tried deleting {} but got: {e}", extractLoc.to_string_lossy())
+				log!("Note: tried deleting {} but got: {e}", extractLoc.to_string_lossy())
 			}
 			files::unzip(zipLoc.as_path(), extractLoc.as_path(), None).await.context("Failed to unzip renderer ")?;
 		}
@@ -748,13 +754,13 @@ async fn cleanup(state: ArcMut<ClientState>, server: &ServerConnection) {
 	
 	match server.logout().await {
 		Ok(_) => {}
-		Err(_) => { println!("Failed to logout"); }
+		Err(_) => { log!("Failed to logout"); }
 	}
 	
 	let res = cleanTask.await;
 	if let Ok(Err(e)) = res {
-		println!("Failed to clean work dir: {e}");
+		log!("Failed to clean work dir: {e}");
 	} else {
-		println!("Cleaned up!");
+		log!("Cleaned up!");
 	}
 }

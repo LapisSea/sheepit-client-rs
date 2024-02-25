@@ -2,13 +2,13 @@ use std::fmt::Display;
 use std::future::Future;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{env, io, thread};
 use std::time::Duration;
 use anyhow::anyhow;
 use tokio::task::JoinHandle;
-use crate::Work;
+use crate::{log, Work};
 use crate::Work::TOKIO_RT;
 
 pub type ResultMsg<T> = anyhow::Result<T>;
@@ -83,14 +83,14 @@ impl<T, E: Display> Warn<T> for Result<T, E> {
 		match self {
 			Ok(r) => { Some(r) }
 			Err(err) => {
-				println!("Warn: {err}");
+				log!("Warn: {err}");
 				None
 			}
 		}
 	}
 }
 
-pub type ArcMut<T> =Arc<Mutex<T>>;
+pub type ArcMut<T> = Arc<Mutex<T>>;
 
 pub trait MutRes<T> {
 	fn access<R>(&self, get: impl FnOnce(&mut T) -> R) -> ResultMsg<R>;

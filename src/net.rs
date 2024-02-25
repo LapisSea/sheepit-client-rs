@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use crate::conf::ClientConfig;
 use crate::fmd5::{checkMd5, computeFileHash, HashCache};
 use crate::defs::*;
-use crate::{HwInfo, ServerConf, ServerConfig, tSleep, tSleepRandRange};
+use crate::{HwInfo, log, ServerConf, ServerConfig, tSleep, tSleepRandRange};
 use crate::ServerConf::ConfError;
 use crate::utils::ResultMsg;
 use rand::Rng;
@@ -231,17 +231,17 @@ impl AddAssign for TransferStats {
 pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache: HashCache) -> ResultMsg<TransferStats> {
 	let pathStr = path.to_string_lossy();
 	if tokio::fs::try_exists(path).await.context(format!("Could not check existence of {pathStr}"))? {
-		println!("Checking validity of {pathStr}...");
+		log!("Checking validity of {pathStr}...");
 		let hash = computeFileHash(path, hashCache).await
 			.map_err(|e| anyhow!("Could not read file \"{}\" because: {e}", pathStr));
 		
 		match hash.and_then(|hash| checkMd5(md5Check, pathStr.as_ref(), hash)) {
 			Ok(_) => {
-				println!("{} already exists, skipping download", pathStr);
+				log!("{} already exists, skipping download", pathStr);
 				return Ok(Default::default());
 			}
 			Err(msg) => {
-				println!("{msg}. Re-downloading...");
+				log!("{msg}. Re-downloading...");
 				tokio::fs::remove_file(path).await
 					.map_err(|e| anyhow!("Could not delete file \"{}\" because: {e}", pathStr))?;
 			}
@@ -265,7 +265,7 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache:
 	let mut context = md5::Context::new();
 	while let Some(item) = StreamExt::next(&mut stream).await {
 		let item = item.context(format!("Could not download \"{url}\""))?;
-		// println!("chunk len {}", item.len());
+		// log!("chunk len {}", item.len());
 		bytesDownloaded += item.len() as u64;
 		let ch = item.as_ref();
 		context.consume(ch);
@@ -276,7 +276,7 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache:
 	let computed = context.compute();
 	checkMd5(md5Check, url, computed)?;
 	
-	println!("\"{pathStr}\" downloaded!");
+	log!("\"{pathStr}\" downloaded!");
 	
 	Ok(start.checked_duration_since(end).map(|time| TransferStats { bytes: bytesDownloaded, time }).unwrap_or_default())
 }
@@ -290,7 +290,7 @@ pub async fn tryConnectToServer(httpClient: &Client, conf: &mut ClientConfig, hw
 				if let Some(pk) = &sConf.publicKey {
 					conf.password = pk.as_str().into();
 				}
-				println!("Server config loaded");
+				log!("Server config loaded");
 				return Ok(sConf);
 			}
 			Err(e) => {
@@ -304,9 +304,9 @@ pub async fn tryConnectToServer(httpClient: &Client, conf: &mut ClientConfig, hw
 				} else {
 					format!("{time} seconds")
 				};
-				println!("Failed to establish connection to server on attempt {attempt}. Trying again in {timeMsg}.\n\tReason: {e}");
+				log!("Failed to establish connection to server on attempt {attempt}. Trying again in {timeMsg}.\n\tReason: {e}");
 				if attempt == 10 {
-					println!("We may be here for a while")
+					log!("We may be here for a while")
 				}
 				if attempt >= 10 {
 					tSleepRandRange!(time/2..=time);

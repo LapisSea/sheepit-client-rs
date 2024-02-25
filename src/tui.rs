@@ -6,7 +6,7 @@ use std::cmp::{max, min};
 use std::ops::Deref;
 use std::sync::Mutex;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use crossterm::{
 	event::{self, Event, KeyCode},
 	execute,
@@ -39,8 +39,7 @@ fn setup_terminal() -> Result<Term> {
 
 fn restore_terminal(terminal: &mut Term) -> Result<()> {
 	disable_raw_mode().context("failed to disable raw mode")?;
-	execute!(terminal.backend_mut(), LeaveAlternateScreen)
-		.context("unable to switch to main screen")?;
+	execute!(terminal.backend_mut(), LeaveAlternateScreen).context("unable to switch to main screen")?;
 	terminal.show_cursor().context("unable to show cursor")
 }
 

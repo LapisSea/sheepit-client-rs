@@ -12,10 +12,18 @@ use tokio::task::JoinHandle;
 use zip::read::ZipFile;
 use zip::ZipArchive;
 use crate::utils::{ArcMut, MutRes, Warn};
-use crate::Work;
+use crate::{log, Work};
 
 pub async fn cleanWorkingDir(path: &Path) -> io::Result<()> {
-	if !fs::metadata(path).await?.is_dir() { return Ok(()); }
+	match fs::metadata(path).await {
+		Ok(meta) => {
+			if !meta.is_dir() { return Ok(()); }
+		}
+		Err(err) => {
+			log!("Info: Did not clean working directory because: {err}");
+			return Ok(());
+		}
+	}
 	
 	let mut dir = fs::read_dir(path).await?;
 	let mut tasks: Vec<JoinHandle<io::Result<()>>> = vec![];
@@ -42,7 +50,7 @@ pub async fn cleanWorkingDir(path: &Path) -> io::Result<()> {
 }
 
 pub async fn deleteDirDeep(path: &Path) -> io::Result<()> {
-	println!("deleting {}", &path.to_string_lossy());
+	log!("deleting {}", &path.to_string_lossy());
 	
 	let mut folders = vec![];
 	let mut tasks: Vec<JoinHandle<io::Result<()>>> = vec![];
@@ -67,7 +75,7 @@ pub async fn deleteDirDeep(path: &Path) -> io::Result<()> {
 		if !files.is_empty() {
 			let task = Work::spawn(async move {
 				for path in files {
-					// println!("deleting {}", path.to_string_lossy());
+					// log!("deleting {}", path.to_string_lossy());
 					fs::remove_file(path.as_path()).await?;
 				}
 				Ok(())
@@ -79,7 +87,7 @@ pub async fn deleteDirDeep(path: &Path) -> io::Result<()> {
 		task.await??;
 	}
 	for folder in folders.iter().rev() {
-		// println!("deleting {}", folder.to_string_lossy());
+		// log!("deleting {}", folder.to_string_lossy());
 		fs::remove_dir(folder.as_path()).await?;
 	}
 	
@@ -107,18 +115,18 @@ async fn cleanupTasks(tasks: &mut Vec<JoinHandle<io::Result<()>>>) -> io::Result
 
 pub fn unzipMem(zipFile: Vec<u8>, destFolder: &Path, password: Option<&[u8]>) -> io::Result<()> {
 	std::fs::create_dir_all(&destFolder)?;
-	println!("Unzipping from {} bytes", zipFile.len());
+	log!("Unzipping from {} bytes", zipFile.len());
 	let mut data = Cursor::new(zipFile.as_slice());
 	let mut archive = ZipArchive::new(&mut data)?;
 	let password = password.map(|p| p.to_owned());
 	unzipWorker(&mut archive, password, destFolder, Default::default(), 1, 0)?;
-	println!("Unzipped  from {} bytes", zipFile.len());
+	log!("Unzipped  from {} bytes", zipFile.len());
 	Ok(())
 }
 
 pub async fn unzip(zipFile: &Path, destFolder: &Path, password: Option<&[u8]>) -> io::Result<()> {
 	fs::create_dir_all(destFolder).await?;
-	println!("Unzipping {}", &zipFile.to_string_lossy());
+	log!("Unzipping {}", &zipFile.to_string_lossy());
 	let mut tasks: Vec<JoinHandle<io::Result<()>>> = vec![];
 	let workerCount = 8;
 	let folders: ArcMut<HashSet<PathBuf>> = Default::default();
@@ -137,7 +145,7 @@ pub async fn unzip(zipFile: &Path, destFolder: &Path, password: Option<&[u8]>) -
 	for task in tasks {
 		task.await??;
 	}
-	println!("Unzipped  {}", &zipFile.to_string_lossy());
+	log!("Unzipped  {}", &zipFile.to_string_lossy());
 	Ok(())
 }
 
@@ -162,7 +170,7 @@ fn unzipWorker<'a, R: Read + io::Seek>(
 			}).unwrap();
 			if !newPath { continue; }
 			std::fs::create_dir_all(&destFolder.join(&entryPath))?;
-			// println!("{}", path.to_string_lossy());
+			// log!("{}", path.to_string_lossy());
 			
 			continue;
 		}
@@ -177,7 +185,7 @@ fn unzipWorker<'a, R: Read + io::Seek>(
 		let path = destFolder.join(entryPath);
 		let mut file = std::fs::File::create(&path)?;
 		std::io::copy(&mut entry, &mut file)?;
-		// println!("Wrote {}", path.to_string_lossy());
+		// log!("Wrote {}", path.to_string_lossy());
 	}
 	
 	Ok(())

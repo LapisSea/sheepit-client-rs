@@ -7,7 +7,7 @@ use anyhow::anyhow;
 use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use crate::conf::{ClientConfig, ComputeMethod};
-use crate::{ClientState, fmd5, FrameUploadMessage, HwInfo, net, RenderResult, ServerConfig};
+use crate::{ClientState, fmd5, FrameUploadMessage, HwInfo, log, net, RenderResult, ServerConfig};
 use crate::job::{Chunk, ClientErrorType, JobInfo, JobResponse};
 use crate::net::TransferStats;
 use crate::utils::{ArcMut, MutRes, ResultJMsg, ResultMsg};
@@ -39,7 +39,7 @@ impl ServerConnection {
 	}
 	
 	pub async fn requestJob(&self, state: ArcMut<ClientState>) -> ResultMsg<JobResponse> {
-		println!("Requesting job");
+		log!("Requesting job");
 		
 		let cores = self.effectiveCores();
 		
@@ -71,11 +71,11 @@ impl ServerConnection {
 				if let Some(ref task) = res.renderTask {
 					let mut task = (*task).clone();
 					task.script = "<stuff>".into();
-					println!("Requested job: {:#?}", task);
+					log!("Requested job: {:#?}", task);
 				}
 			}
 			Err(err) => {
-				println!("Failed to request job: {err}");
+				log!("Failed to request job: {err}");
 			}
 		}
 		res
@@ -96,27 +96,27 @@ impl ServerConnection {
 	}
 	
 	pub async fn keepMeAlive(&self, state: ClientState) -> bool {
-		println!("keepMeAlive start");
+		log!("keepMeAlive start");
 		let res = servReq!(self,keepMeAlive,get).query(&[
 			("paused", state.paused)
 		]).send().await;
 		match res {
 			Ok(ok) => {
-				println!("keepMeAlive ok");
+				log!("keepMeAlive ok");
 				true
 			}
 			Err(err) => {
-				eprintln!("keepMeAlive error: {err}");
+				log!("keepMeAlive error: {err}");
 				false
 			}
 		}
 	}
 	
 	pub async fn logout(&self) -> ResultJMsg {
-		println!("Logging out");
+		log!("Logging out");
 		let res = servReq!(self,logout,get).send().await.map(|_| ());
 		if res.is_ok() {
-			println!("Logged out");
+			log!("Logged out");
 		}
 		res
 	}
@@ -138,7 +138,7 @@ impl ServerConnection {
 				path.file_name().unwrap_or_default().to_string_lossy(),
 				file
 					.mime_str(match ext.deref() {
-						"txt" => { mime::TEXT_PLAIN }
+						"txt" => { "text/plain" }
 						_ => { return Err(anyhow!("Could not find mime type of: {ext}")); }
 					}.as_ref()).unwrap()
 					.file_name(path.to_string_lossy().to_string()),

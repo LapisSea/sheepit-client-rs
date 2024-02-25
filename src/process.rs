@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use crate::defs::POST_LOAD_NOTIFICATION;
 use crate::job::Job;
-use crate::{defs, ServerConnection};
+use crate::{defs, log, ServerConnection};
 use crate::utils::{ResultJMsg, ResultMsg};
 
 pub async fn createBlenderCommand(job: Arc<Job>, server: Arc<ServerConnection>) -> ResultMsg<(Command, Vec<PathBuf>)> {
@@ -199,13 +199,13 @@ pub fn observeBlendStdout(info: &mut BlendProcessInfo, line: String) {
 				longVersion: captures.get(1).unwrap().as_str().to_string(),
 				shortVersion: captures.get(2).unwrap().as_str().to_string(),
 			});
-			println!("## {line}");
+			log!("## {line}");
 		}
 	}
 	
 	if line == POST_LOAD_NOTIFICATION {
 		timeIt!(info, prepStart);
-		println!("## {line}");
+		log!("## {line}");
 	}
 	
 	if let Some(captures) = RENDER_PROGRESS.captures(line) {
@@ -215,13 +215,13 @@ pub fn observeBlendStdout(info: &mut BlendProcessInfo, line: String) {
 			timeIt!(info, renderStart);
 			let progress = (tileJustProcessed as f32 * 100f32) / totalTilesInJob as f32;
 			info.progress = progress;
-			println!("## {line}");
+			log!("## {line}");
 		}
 	}
 	
 	if BEGIN_POST_PROCESSING.captures(line).is_some() {
 		timeIt!(info, compositStart);
-		println!("## {line}");
+		log!("## {line}");
 	}
 	
 	if let Some(captures) = SAMPLE_SPEED.captures(line) {
@@ -230,7 +230,7 @@ pub fn observeBlendStdout(info: &mut BlendProcessInfo, line: String) {
 		if let (Some(amount), Some(duration)) = (amount, duration) {
 			if duration != 0f32 {
 				info.speedSamplesRendered = amount as f32 / duration;
-				println!("## {line}");
+				log!("## {line}");
 			}
 		}
 	}

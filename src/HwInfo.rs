@@ -4,7 +4,7 @@ use raw_cpuid::CpuId;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 use tokio::task::JoinHandle;
 use crate::utils::ResultMsg;
-use crate::Work;
+use crate::{log, Work};
 
 
 #[derive(Debug, Clone)]
@@ -38,13 +38,13 @@ pub async fn collectInfo() -> ResultMsg<HwInfo> {
 			.or_else(|_| hwIdOf(vec![HWIDComponent::MacAddress]))
 			.or_else(|_| hwIdOf(vec![HWIDComponent::Username, HWIDComponent::MachineName, HWIDComponent::OSName]))
 			.map_err(|e| anyhow!("Failed to create HW-ID"));
-		// println!("id done");
+		// log!("id done");
 		res
 	});
 	
 	let cpuidRes: JoinHandle<ResultMsg<_>> = Work::spawn(async {
 		let cpuid = CpuId::new();
-		//println!("{:#?}", cpuid);
+		//log!("{:#?}", cpuid);
 		
 		let info = cpuid.get_feature_info().ok_or(anyhow!("Failed to get CPU info"))?;
 		let vendor = cpuid.get_vendor_info().ok_or(anyhow!("Failed to get CPU Vendor info"))?
@@ -61,7 +61,7 @@ pub async fn collectInfo() -> ResultMsg<HwInfo> {
 		let cores = cpuid.get_processor_capacity_feature_info()
 			.map(|info| info.num_phys_threads() as u16);
 		
-		// println!("info done");
+		// log!("info done");
 		Ok((vendor, cpuName, familyId, modelId, steppingId, frequency, cores))
 	});
 	let sysInfo = Work::spawn(async {
@@ -82,12 +82,11 @@ pub async fn collectInfo() -> ResultMsg<HwInfo> {
 	let hwId = get!(hwId)?;
 	let (frequency2, totalSystemMemory) = get!(sysInfo)?;
 	if frequency.is_none() {
-		println!("Failed to get frequency from cpuid. Trying again");
 		frequency = frequency2;
-		if frequency.is_none() { println!("Failed to get frequency!"); }
+		if frequency.is_none() { log!("Failed to get frequency!"); }
 	}
 	if cores.is_none() {
-		println!("Failed to get core count. Trying again");
+		log!("Failed to get core count. Trying again");
 		let sys = System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
 		let count = sys.cpus().len() as u16;
 		if count > 0 { cores = Some(count); }
