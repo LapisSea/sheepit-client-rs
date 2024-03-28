@@ -121,7 +121,7 @@ fn main() -> ExitCode {
 		if let Err(err) = res.as_ref() {
 			log!("Aborting client because:\n{}", err);
 		}
-		tSleep!(2);
+		
 		let _ = state().access(|s| s.quitState = QuitState::Quit);
 		res
 	}).map_err(|e| format!("Aborting client because:\n{e}"));
@@ -139,8 +139,14 @@ fn main() -> ExitCode {
 async fn start() -> ResultJMsg {
 	log!("###Start");
 	let hwInfo = Work::spawn(HwInfo::collectInfo());
-	let mut clientConf = conf::read(&mut env::args().skip(1).map(|x| x.into()))?.make()?;
+	let clientConf = conf::read(&mut env::args().skip(1).map(|x| x.into()))?;
 	
+	let mut clientConf = clientConf.make()?;
+	
+	log!("{:#?}",clientConf);
+	
+	// log!("{:?}",dirs::home_dir());
+	// return Ok(());
 	
 	let mut cleanTask = Some({
 		let path = (*clientConf.workPath).to_owned();
@@ -384,6 +390,13 @@ async fn run(state: ArcMut<ClientState>, server: Arc<ServerConnection>) -> AppLo
 		}
 	};
 	
+	//Disable actual work
+	// if job.renderTask.as_ref()
+	// 	.and_then(|task| task.id.parse::<i32>().ok().map(|id| id > 10))
+	// 	.unwrap_or(false) {
+	// 	return AppLoopAction::FatalStop(anyhow!("I don't wanna work >:("));
+	// }
+	
 	let res = match preprocessJob(server.as_ref(), job).await {
 		Ok(res) => { res }
 		Err(err) => { return AppLoopAction::FatalStop(err); }
@@ -391,7 +404,7 @@ async fn run(state: ArcMut<ClientState>, server: Arc<ServerConnection>) -> AppLo
 	match res {
 		JobResult::CreateNewSession => { AppLoopAction::CreateNewSession }
 		JobResult::NewJob(job) => {
-			match execute_job(state.clone(), server, job.into()).await {
+			match execute_job(state, server, job.into()).await {
 				Ok(_) => { AppLoopAction::Continue }
 				Err(err) => { AppLoopAction::FatalStop(err) }
 			}

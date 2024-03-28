@@ -142,7 +142,7 @@ pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> ResultMsg<ConfigBu
 					_ => { return Err(anyhow!("-headless can be only true or false")); }
 				});
 			}
-			"-hostname" => {
+			"-server" => {
 				let str = requireNext(args)?;
 				let url = match Url::parse(str.as_ref()) {
 					Ok(u) => { u }
