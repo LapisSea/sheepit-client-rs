@@ -57,7 +57,7 @@ pub struct RequestEndPoint {
 }
 
 impl RequestEndPoint {
-	pub fn get<S: AsRef<str> + Display>(&self, client: &Client, domain: S) -> ReqBuild {
+	pub fn get(&self, client: &Client, domain: &Url) -> ReqBuild {
 		let path = self.makeUrl(domain);
 		ReqBuild {
 			path: path.clone(),
@@ -65,11 +65,11 @@ impl RequestEndPoint {
 		}
 	}
 	
-	pub fn makeUrl<S: Display>(&self, domain: S) -> String {
-		format!("{domain}{}", self.path.as_str())
+	pub fn makeUrl(&self, domain: &Url) -> Url {
+		appendUrl(domain, &self.path)
 	}
 	
-	pub fn post<S: AsRef<str> + Display>(&self, client: &Client, domain: S) -> ReqBuild {
+	pub fn post(&self, client: &Client, domain: &Url) -> ReqBuild {
 		let path = self.makeUrl(domain);
 		ReqBuild {
 			path: path.clone(),
@@ -77,21 +77,20 @@ impl RequestEndPoint {
 		}
 	}
 	
-	pub async fn postRequestQueryParm<
-		S: AsRef<str> + Display,
-		ARGS: Serialize + ?Sized
-	>(&self, client: &Client, doamin: S, query: &ARGS) -> ResultMsg<Req> {
-		self.post(client, doamin).query(query).send().await
+	pub async fn postRequestQueryParm<ARGS: Serialize + ?Sized>(
+		&self, client: &Client, domain: &Url, query: &ARGS,
+	) -> ResultMsg<Req> {
+		self.post(client, domain).query(query).send().await
 	}
 }
 
 pub struct Req {
-	path: Box<str>,
+	path: Url,
 	res: Response,
 }
 
 pub struct ReqBuild {
-	pub path: String,
+	pub path: Url,
 	pub req: RequestBuilder,
 }
 
@@ -105,7 +104,7 @@ impl ReqBuild {
 	
 	pub async fn send(self) -> ResultMsg<Req> {
 		Ok(Req {
-			path: self.path.clone().into(),
+			path: self.path.clone(),
 			res: send::<&str>(self.path.as_ref(), self.req).await?,
 		})
 	}
@@ -281,6 +280,20 @@ pub async fn downloadFile(path: &Path, req: ReqBuild, md5Check: &str, hashCache:
 	Ok(start.checked_duration_since(end).map(|time| TransferStats { bytes: bytesDownloaded, time }).unwrap_or_default())
 }
 
+pub fn appendUrl(base: &Url, path: &str) -> Url {
+	let mut res = base.clone();
+	{
+		let mut build = res.path_segments_mut().unwrap();
+		build.pop_if_empty();
+		path.split('/').filter(|s| !s.is_empty()).for_each(|p| { build.push(p); });
+	}
+	res
+}
+
+#[test]
+fn test_appendUrl() {
+	assert_eq!(appendUrl(&Url::parse("https://test.com/").unwrap(), "hello/world").as_str(), "https://test.com/hello/world");
+}
 
 pub async fn tryConnectToServer(httpClient: &Client, conf: &mut ClientConfig, hwInfo: &HwInfo::HwInfo) -> ResultMsg<ServerConfig> {
 	let mut attempt: u32 = 1;
