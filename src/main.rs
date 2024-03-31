@@ -639,7 +639,7 @@ async fn render(job: Arc<Job>, server: Arc<ServerConnection>) -> Result<RenderRe
 	
 	maxRenderTimeTrigger.abort();
 	
-	log!("{:#?}", procInfo);
+	// log!("{:#?}", procInfo);
 	
 	let mut outputFiles = vec![];
 	let nameStart = format!("{}_{}.", job.info.id, job.info.frameNumber);
@@ -686,7 +686,9 @@ async fn prepareWorkingDirectory(server: Arc<ServerConnection>, job: Arc<Job>) -
 		let extractLoc = server.clientConf.rendererPath(&job.info);
 		if !swait!(tokio::fs::try_exists(extractLoc.join("rend.exe")), "").is_ok_and(|r| r) {
 			if let Err(e) = files::deleteDirDeep(&extractLoc).await {
-				log!("Note: tried deleting {} but got: {e}", extractLoc.to_string_lossy())
+				if fs::try_exists(&extractLoc).await.unwrap_or(true) {
+					log!("Note: tried deleting {} but got: {e}", extractLoc.to_string_lossy());
+				}
 			}
 			files::unzip(zipLoc.as_path(), extractLoc.as_path(), None).await.context("Failed to unzip renderer ")?;
 		}

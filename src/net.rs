@@ -184,7 +184,7 @@ pub fn fromXml<'de, T: de::Deserialize<'de>>(xml: &str) -> ResultMsg<T> {
 	let mut body = xml.trim();
 	if body.starts_with("<?xml") {
 		let mark = "?>";
-		body = &body[body.find(mark).unwrap_or(0) + mark.len()..].trim();
+		body = body[body.find(mark).unwrap_or(0) + mark.len()..].trim();
 	}
 	serde_xml_rs::from_str(body).map_err(|e| anyhow!("Could not parse {} because: {}\nXML Text:\n{}", std::any::type_name::<T>(), e, xml))
 }

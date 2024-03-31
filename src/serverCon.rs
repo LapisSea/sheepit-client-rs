@@ -69,9 +69,7 @@ impl ServerConnection {
 		match &res {
 			Ok(res) => {
 				if let Some(ref task) = res.renderTask {
-					let mut task = (*task).clone();
-					task.script = "<stuff>".into();
-					log!("Requested job: {:#?}", task);
+					log!("Requested job: {:#?}", task.name);
 				}
 			}
 			Err(err) => {
