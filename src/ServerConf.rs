@@ -1,10 +1,11 @@
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use reqwest::{Client, IntoUrl, Response};
+use anyhow::anyhow;
+use reqwest::{Client, IntoUrl, Response, Url};
 use serde::{Deserialize, Serialize};
 
-use crate::{ HwInfo, net, RequestEndPoint, ServerConfig};
+use crate::{HwInfo, log, net, RequestEndPoint, ServerConfig};
 use crate::conf::ClientConfig;
 use crate::defs::*;
 use crate::net::*;
@@ -140,26 +141,31 @@ impl ServerConfigBuild {
 }
 
 pub async fn fetchNew(httpClient: &Client, conf: &ClientConfig, hwInfo: &HwInfo::HwInfo) -> Result<ServerConfig, ConfError> {
-	let args = &[
-		("login", conf.login.clone()),
-		("password", conf.password.clone()),
-		("cpu_family", hwInfo.familyId.to_string().into()),
-		("cpu_model", hwInfo.modelId.to_string().into()),
-		("cpu_model_name", hwInfo.cpuName.clone().into()),
-		("cpu_cores", hwInfo.cores.to_string().into()),
-		("os", env::consts::OS.into()),
-		("os_version", hwInfo.osName.clone().into()),
-		("ram", hwInfo.totalSystemMemory.to_string().into()),
-		("bits", if cfg!(target_pointer_width = "64") { "64bit".into() } else { "32bit".into() }),
-		("version", CLIENT_VERSION.into()),
-		("hostname", format!("{}", hwInfo.hostName).into()),
-		("ui", "GuiText".into()),
-		("extras", "".into()),
-		("headless", conf.headless.to_string().into()),
-		("hwid", hwInfo.hwId.clone().into()),
+	let args: &[(&str, &str)] = &[
+		("login", &conf.login),
+		("password", &conf.password),
+		("cpu_family", &hwInfo.familyId.to_string()),
+		("cpu_model", &hwInfo.modelId.to_string()),
+		("cpu_model_name", &hwInfo.cpuName),
+		("cpu_cores", &hwInfo.cores.to_string()),
+		("os", env::consts::OS),
+		("os_version", &hwInfo.osName),
+		("ram", &hwInfo.totalSystemMemory.to_string()),
+		("bits", if cfg!(target_pointer_width = "64") { "64bit" } else { "32bit" }),
+		("version", CLIENT_VERSION),
+		("hostname", &hwInfo.hostName),
+		("ui", "GuiText"),
+		("extras", ""),
+		("headless", &conf.headless.to_string()),
+		("hwid", &hwInfo.hwId),
 	];
-	let url = format!("{}{}", conf.hostname, SERVER_CONF_ENDPOINT);
-	// log!("{:#?}", args);
+	let mut url = conf.hostname.clone();
+	{
+		let mut urlBuild = url.path_segments_mut()
+			.map_err(|e| ConfError::IOError("Illegal hostname".to_string()))?;
+		SERVER_CONF_ENDPOINT.split('/').filter(|s| !s.is_empty())
+			.for_each(|p| { urlBuild.push(p); });
+	}
 	
 	let xml = postRequestForm(httpClient, url, args, XML_CONTENT_O).await
 		.map_err(|e| ConfError::IOError(e.to_string()))?;

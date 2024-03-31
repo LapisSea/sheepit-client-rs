@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use anyhow::{anyhow, Context};
 use reqwest::Url;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::defs::BASE_URL;
 use crate::job::{Chunk, Job, JobInfo};
 use crate::{log, utils};
@@ -31,7 +31,8 @@ impl Display for ComputeMethod {
 pub struct ClientConfig {
 	pub login: Box<str>,
 	pub password: Box<str>,
-	pub hostname: Box<str>,
+	#[serde(serialize_with = "serialize_url", deserialize_with = "deserialize_url")]
+	pub hostname: Url,
 	pub workPath: Box<Path>,
 	pub binCachePath: Box<Path>,
 	pub headless: bool,
@@ -39,6 +40,15 @@ pub struct ClientConfig {
 	pub maxCpuCores: Option<u16>,
 	pub maxMemory: Option<u64>,
 	pub maxRenderTime: Option<Duration>,
+}
+
+fn serialize_url<S>(url: &Url, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+	url.as_str().serialize(serializer)
+}
+
+fn deserialize_url<'de, D>(deserializer: D) -> Result<Url, D::Error> where D: Deserializer<'de> {
+	let url_str = String::deserialize(deserializer)?;
+	Url::parse(&url_str).map_err(serde::de::Error::custom)
 }
 
 impl ClientConfig {
@@ -70,7 +80,7 @@ impl ClientConfig {
 pub struct ConfigBuild {
 	login: Option<Box<str>>,
 	password: Option<Box<str>>,
-	hostname: Option<Box<str>>,
+	hostname: Option<Box<Url>>,
 	workPath: Option<Box<Path>>,
 	binCachePath: Option<Box<Path>>,
 	headless: Option<bool>,
@@ -91,7 +101,7 @@ impl ConfigBuild {
 		Ok(ClientConfig {
 			login: req(self.login, "The -login <username> is required")?,
 			password: req(self.password, "The -password <password> is required")?,
-			hostname: self.hostname.unwrap_or(BASE_URL.into()),
+			hostname: self.hostname.map(|u| *u).unwrap_or_else(|| Url::parse(BASE_URL).unwrap()),
 			workPath: absolute_path(req(self.workPath, "The -cache-dir <folder path> is required")?)
 				.context("Failed to turn path of workPath to absolute")?.into(),
 			binCachePath: absolute_path(req(self.binCachePath, "The -cache-dir <folder path> is required")?)
@@ -150,7 +160,7 @@ pub(crate) fn read(args: &mut dyn Iterator<Item=Box<str>>) -> ResultMsg<ConfigBu
 						return Err(anyhow!("Malformed -hostname: \"{err}\""));
 					}
 				};
-				res.hostname = Some(url.to_string().into());
+				res.hostname = Some(url.into());
 			}
 			"-computemethod" => {
 				let str = requireNext(args)?.to_lowercase();
